@@ -163,6 +163,9 @@ func main() {
 	// Create renderer
 	renderer := dom.NewRenderer(htmlRoot, stylesheet, float64(actualWinWidth), float64(actualWinHeight))
 
+	// Wire real font metrics into layout context
+	renderer.LayoutCtx.TextMeasurer = gpu.NewTextMeasurerAdapter(painter)
+
 	// Create event manager
 	eventManager := dom.NewEventManager()
 

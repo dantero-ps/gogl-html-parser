@@ -31,14 +31,20 @@ func RenderText(box *layout.LayoutBox, dl *DisplayList) {
 	// Font Family
 	fontFamily := getStyleValue(box, "font-family")
 	if fontFamily == "" {
-		fontFamily = "Helvatica"
+		fontFamily = "Helvetica"
+	}
+
+	// Baseline: if layout measured real ascent, use it; otherwise fall back to fontSize.
+	ascent := box.TextAscent
+	if ascent <= 0 {
+		ascent = fontSize
 	}
 
 	// Add DrawText command using the Content box coordinates
 	dl.Add(DrawTextCmd{
 		Text:       text,
 		X:          box.Dimensions.Content.X,
-		Y:          box.Dimensions.Content.Y + fontSize, // Baseline adjustment
+		Y:          box.Dimensions.Content.Y + ascent, // Baseline = top + ascent
 		FontSize:   fontSize,
 		Color:      textColor,
 		FontFamily: fontFamily,

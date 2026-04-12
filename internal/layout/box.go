@@ -13,6 +13,7 @@ type LayoutContext struct {
 	RootFontSize   float64
 	ViewportWidth  float64
 	ViewportHeight float64
+	TextMeasurer   TextMeasurer
 }
 
 func NewLayoutContext(viewportWidth, viewportHeight float64) *LayoutContext {
@@ -21,6 +22,14 @@ func NewLayoutContext(viewportWidth, viewportHeight float64) *LayoutContext {
 		ViewportWidth:  viewportWidth,
 		ViewportHeight: viewportHeight,
 	}
+}
+
+// GetTextMeasurer returns the configured TextMeasurer, falling back to FallbackMeasurer.
+func (ctx *LayoutContext) GetTextMeasurer() TextMeasurer {
+	if ctx.TextMeasurer != nil {
+		return ctx.TextMeasurer
+	}
+	return &FallbackMeasurer{}
 }
 
 type EdgeSizes struct {
@@ -79,4 +88,6 @@ type LayoutBox struct {
 	StyledNode *style.StyledNode
 	Dimensions Dimensions
 	Children   []*LayoutBox
+	Parent     *LayoutBox
+	TextAscent float64 // distance from content top to baseline, set for text nodes
 }

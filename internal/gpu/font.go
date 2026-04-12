@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 
+	"goglweb/internal/layout"
+
 	"github.com/go-gl/gl/v4.1-core/gl"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
@@ -97,15 +99,17 @@ func (a *FontAtlas) GetGlyph(r rune) (GlyphInfo, bool) {
 		)
 	}
 
-	bounds, _, _ := a.Face.GlyphBounds(r)
+	// Use dr.Min for bearing — it is exactly where face.Glyph placed the pixels,
+	// so it matches the atlas image without the ±1px rounding error that
+	// bounds.Min.X/Y.Round() can introduce.
 	info := GlyphInfo{
 		X:        a.NextX,
 		Y:        a.NextY,
 		Width:    dr.Dx(),
 		Height:   dr.Dy(),
 		AdvanceX: adv.Round(),
-		BearingX: bounds.Min.X.Round(),
-		BearingY: bounds.Min.Y.Round(),
+		BearingX: dr.Min.X,
+		BearingY: dr.Min.Y,
 	}
 
 	a.Characters[r] = info
@@ -117,8 +121,42 @@ func (a *FontAtlas) GetGlyph(r rune) (GlyphInfo, bool) {
 	return info, true
 }
 
+// SanitizeFontFamily cleans a CSS font-family value for safe filesystem lookup.
+// Removes quotes, path traversal attempts, null bytes, and shell metacharacters.
+func SanitizeFontFamily(fontFamily string) string {
+	if fontFamily == "" {
+		return ""
+	}
+
+	// Strip surrounding quotes (single or double)
+	fontFamily = strings.Trim(fontFamily, `"'`)
+
+	// Remove null bytes
+	fontFamily = strings.ReplaceAll(fontFamily, "\x00", "")
+
+	// Remove path traversal characters
+	fontFamily = strings.ReplaceAll(fontFamily, "..", "")
+	fontFamily = strings.ReplaceAll(fontFamily, "/", "")
+	fontFamily = strings.ReplaceAll(fontFamily, "\\", "")
+
+	// Remove shell metacharacters
+	dangerous := []string{";", "|", "&", "$", "`", "(", ")", "{", "}", "<", ">"}
+	for _, ch := range dangerous {
+		fontFamily = strings.ReplaceAll(fontFamily, ch, "")
+	}
+
+	// Trim whitespace
+	fontFamily = strings.TrimSpace(fontFamily)
+
+	return fontFamily
+}
+
 // findSystemFont finds the file path in the system for the given font family name.
 func findSystemFont(fontFamily string) (string, error) {
+	fontFamily = SanitizeFontFamily(fontFamily)
+	if fontFamily == "" {
+		return "", fmt.Errorf("empty font family after sanitization")
+	}
 	var searchPaths []string
 	switch runtime.GOOS {
 	case "windows":
@@ -169,6 +207,36 @@ func getDefaultFont() string {
 	default:
 		return "dejavu"
 	}
+}
+
+// MeasureText measures the width of text using real glyph advance widths.
+// The fontFamily parameter is ignored (uses the atlas's loaded face).
+// fontSize scales relative to the atlas's base font size.
+func (a *FontAtlas) MeasureText(text string, fontFamily string, fontSize float64) layout.TextMetrics {
+	scale := fontSize / a.FontSize
+	var totalAdvance fixed.Int26_6
+	for _, r := range text {
+		adv, ok := a.Face.GlyphAdvance(r)
+		if !ok {
+			// fallback: estimate from font size
+			adv = fixed.I(int(a.FontSize))
+		}
+		totalAdvance += adv
+	}
+	metrics := a.Face.Metrics()
+	lineHeight := (metrics.Ascent + metrics.Descent).Round()
+	ascent := metrics.Ascent.Round()
+	return layout.TextMetrics{
+		Width:      float64(totalAdvance.Round()) * scale,
+		Height:     float64(lineHeight) * scale,
+		Ascent:     float64(ascent) * scale,
+		LineHeight: float64(lineHeight) * scale * 1.2,
+	}
+}
+
+// MeasureWord measures a single word using real glyph advance widths.
+func (a *FontAtlas) MeasureWord(word string, fontFamily string, fontSize float64) float64 {
+	return a.MeasureText(word, fontFamily, fontSize).Width
 }
 
 // BuildFontAtlas initializes a new dynamic atlas from a font file.

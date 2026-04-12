@@ -2,6 +2,10 @@ package html
 
 import "strings"
 
+// maxNestingDepth limits how deeply HTML elements can be nested.
+// Prevents stack overflow from malformed or adversarial input.
+const maxNestingDepth = 256
+
 type Parser struct {
 	tokenizer *Tokenizer
 }
@@ -35,6 +39,10 @@ func (p *Parser) Parse() *Node {
 			}
 
 			if !tok.IsSelfClosing {
+				if len(stack) >= maxNestingDepth {
+					// Don't push — element stays at max depth, preventing deeper nesting
+					continue
+				}
 				stack = append(stack, node)
 			}
 

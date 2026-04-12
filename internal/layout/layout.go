@@ -74,7 +74,7 @@ func collapseMargins(margin1, margin2 float64) float64 {
 func (box *LayoutBox) calculateBlockDimensions(containingBlock Dimensions, ctx *LayoutContext) {
 	box.calculateBlockWidth(containingBlock, ctx)
 	box.calculateBlockPosition(containingBlock, ctx)
-	box.calculateBlockHeight(ctx)
+	box.calculateBlockHeight(containingBlock, ctx)
 }
 
 func (box *LayoutBox) layoutInline(containingBlock Dimensions, ctx *LayoutContext) {
@@ -87,8 +87,11 @@ func (box *LayoutBox) layoutInline(containingBlock Dimensions, ctx *LayoutContex
 	if box.StyledNode != nil && box.StyledNode.Node.Type == 0 {
 		content := box.StyledNode.Node.Content
 		fontSize := ParseLengthWithContext(box.getValue("font-size"), 16, box, ctx)
-		box.Dimensions.Content.Width = float64(len(content)) * fontSize * 0.6
-		box.Dimensions.Content.Height = fontSize
+		fontFamily := box.getValue("font-family")
+		metrics := ctx.GetTextMeasurer().MeasureText(content, fontFamily, fontSize)
+		box.Dimensions.Content.Width = metrics.Width
+		box.Dimensions.Content.Height = metrics.Height
+		box.TextAscent = metrics.Ascent
 		// Set text node position
 		box.Dimensions.Content.X = containingBlock.Content.X
 		box.Dimensions.Content.Y = containingBlock.Content.Y
@@ -122,6 +125,7 @@ func (box *LayoutBox) layoutAnonymous(containingBlock Dimensions, ctx *LayoutCon
 	currentX := box.Dimensions.Content.X
 	currentY := box.Dimensions.Content.Y
 	maxHeight := 0.0
+	totalHeight := 0.0
 
 	for _, child := range box.Children {
 		child.LayoutWithContext(Dimensions{
@@ -141,6 +145,7 @@ func (box *LayoutBox) layoutAnonymous(containingBlock Dimensions, ctx *LayoutCon
 
 		// Wrap check: if line overflows, move to new line
 		if currentX+marginBox.Width > containingBlock.Content.X+containingBlock.Content.Width {
+			totalHeight += maxHeight
 			currentX = containingBlock.Content.X
 			currentY += maxHeight
 			maxHeight = marginBox.Height
@@ -152,7 +157,8 @@ func (box *LayoutBox) layoutAnonymous(containingBlock Dimensions, ctx *LayoutCon
 		currentX += marginBox.Width
 	}
 
-	box.Dimensions.Content.Height = maxHeight
+	totalHeight += maxHeight
+	box.Dimensions.Content.Height = totalHeight
 }
 
 func (box *LayoutBox) calculateBlockWidth(containingBlock Dimensions, ctx *LayoutContext) {
@@ -253,7 +259,7 @@ func (box *LayoutBox) calculateBlockPosition(containingBlock Dimensions, ctx *La
 	box.Dimensions.Content.Y = containingBlock.Content.Y + marginTop + borderTop + paddingTop
 }
 
-func (box *LayoutBox) calculateBlockHeight(ctx *LayoutContext) {
+func (box *LayoutBox) calculateBlockHeight(containingBlock Dimensions, ctx *LayoutContext) {
 	marginBottom := ParseLengthWithContext(box.getMarginBottom(), 0, box, ctx)
 	borderBottom := ParseLengthWithContext(box.getBorderBottom(), 0, box, ctx)
 	paddingBottom := ParseLengthWithContext(box.getPaddingBottom(), 0, box, ctx)
@@ -264,7 +270,7 @@ func (box *LayoutBox) calculateBlockHeight(ctx *LayoutContext) {
 
 	height := box.getHeight()
 	if height != "auto" {
-		contentHeight := ParseLengthWithContext(height, 0, box, ctx)
+		contentHeight := ParseLengthWithContext(height, containingBlock.Content.Height, box, ctx)
 
 		minHeight := ParseLengthWithContext(box.getValue("min-height"), 0, box, ctx)
 		maxHeightStr := box.getValue("max-height")
@@ -538,5 +544,8 @@ func ParseLengthWithContext(value string, defaultValue float64, box *LayoutBox, 
 }
 
 func getParentBox(box *LayoutBox) *LayoutBox {
-	return nil
+	if box == nil {
+		return nil
+	}
+	return box.Parent
 }

@@ -5,6 +5,93 @@ import (
 	"testing"
 )
 
+func TestNestingDepthLimit(t *testing.T) {
+	// Create HTML with 300 nested divs — should not panic
+	var sb strings.Builder
+	for i := 0; i < 300; i++ {
+		sb.WriteString("<div>")
+	}
+	sb.WriteString("deep")
+	for i := 0; i < 300; i++ {
+		sb.WriteString("</div>")
+	}
+
+	parser := NewParser(sb.String())
+	root := parser.Parse()
+
+	if root == nil {
+		t.Fatal("Parser should return a valid tree, not nil")
+	}
+
+	// Walk to the deepest node
+	depth := 0
+	node := root
+	for len(node.Children) > 0 {
+		found := false
+		for _, child := range node.Children {
+			if child.Type == ElementNode {
+				node = child
+				depth++
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+
+	if depth > maxNestingDepth {
+		t.Errorf("Nesting depth %d exceeds limit %d", depth, maxNestingDepth)
+	}
+
+	// Verify the deep text "deep" exists somewhere in the tree
+	if !containsText(root, "deep") {
+		t.Error("Deep text content should still be in the tree")
+	}
+}
+
+func TestNormalNestingWorks(t *testing.T) {
+	// 10 levels of nesting should work fine
+	html := `<div><div><div><div><div><div><div><div><div><div>hello</div></div></div></div></div></div></div></div></div></div>`
+	parser := NewParser(html)
+	root := parser.Parse()
+
+	depth := 0
+	node := root
+	for len(node.Children) > 0 {
+		found := false
+		for _, child := range node.Children {
+			if child.Type == ElementNode {
+				node = child
+				depth++
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+
+	// root is div 1, then we walk 9 children to reach div 10 — depth = 9
+	if depth != 9 {
+		t.Errorf("Expected depth 9 (10 divs, root + 9 children walked), got %d", depth)
+	}
+}
+
+func containsText(node *Node, text string) bool {
+	if node.Type == TextNode && strings.Contains(node.Content, text) {
+		return true
+	}
+	for _, child := range node.Children {
+		if containsText(child, text) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestFullParser(t *testing.T) {
 	input := `<section id="main"><img src="logo.png"><p>Hello <b>World</b></p><br /></section>`
 	p := NewParser(input)

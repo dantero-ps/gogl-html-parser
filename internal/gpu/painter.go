@@ -60,6 +60,54 @@ func NewGPUPainter(width, height float64, vertexPath, fragmentPath string) (*GPU
 	return p, nil
 }
 
+// TextMeasurerAdapter wraps GPUPainter to implement layout.TextMeasurer.
+// Font atlases are loaded lazily when first measured.
+type TextMeasurerAdapter struct {
+	painter *GPUPainter
+}
+
+// NewTextMeasurerAdapter returns a layout.TextMeasurer backed by real font glyph metrics.
+func NewTextMeasurerAdapter(p *GPUPainter) layout.TextMeasurer {
+	return &TextMeasurerAdapter{painter: p}
+}
+
+func (a *TextMeasurerAdapter) MeasureText(text string, fontFamily string, fontSize float64) layout.TextMetrics {
+	atlas := a.painter.getOrLoadAtlas(fontFamily, fontSize)
+	if atlas == nil {
+		fb := &layout.FallbackMeasurer{}
+		return fb.MeasureText(text, fontFamily, fontSize)
+	}
+	return atlas.MeasureText(text, fontFamily, fontSize)
+}
+
+func (a *TextMeasurerAdapter) MeasureWord(word string, fontFamily string, fontSize float64) float64 {
+	return a.MeasureText(word, fontFamily, fontSize).Width
+}
+
+// getOrLoadAtlas returns (or lazily loads) a FontAtlas for the given family and size.
+func (p *GPUPainter) getOrLoadAtlas(fontFamily string, fontSize float64) *FontAtlas {
+	if fontSize <= 0 {
+		fontSize = 16.0
+	}
+	cacheKey := fmt.Sprintf("%s-%.1f", fontFamily, fontSize)
+	if atlas, ok := p.fontCache[cacheKey]; ok {
+		return atlas
+	}
+	fontPath, err := findSystemFont(fontFamily)
+	if err != nil {
+		fontPath, err = findSystemFont(getDefaultFont())
+		if err != nil {
+			return nil
+		}
+	}
+	atlas, err := p.BuildFontAtlas(fontPath, fontSize)
+	if err != nil {
+		return nil
+	}
+	p.fontCache[cacheKey] = atlas
+	return atlas
+}
+
 // updateProjection sends the projection matrix to the shader.
 func (p *GPUPainter) updateProjection() {
 	p.shader.Use()

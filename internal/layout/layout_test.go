@@ -4,6 +4,7 @@ import (
 	"goglweb/internal/parser/css"
 	"goglweb/internal/parser/html"
 	"goglweb/internal/style"
+	"math"
 	"strings"
 	"testing"
 )
@@ -628,5 +629,106 @@ func TestWhitespaceOnlyTextNodesInLayout(t *testing.T) {
 
 	if whitespaceBoxCount > 0 {
 		t.Errorf("BUG DETECTED: %d whitespace-only text boxes were created in layout. These boxes cause black rectangles to appear when rendered.", whitespaceBoxCount)
+	}
+}
+
+// TestNestedEmResolution tests that em resolves against parent font-size, not root.
+// Parent has font-size: 1.5em (= 24px with root 16), child has font-size: 2em (= 48px).
+func TestNestedEmResolution(t *testing.T) {
+	parentNode := &html.Node{
+		TagName: "div",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{TagName: "span", Type: html.ElementNode},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "div", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "font-size", Value: "1.5em"},
+				{Property: "width", Value: "800px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "font-size", Value: "2em"},
+				{Property: "width", Value: "10em"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(parentNode, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	ctx := NewLayoutContext(1000, 800)
+	ctx.RootFontSize = 16.0
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 1000, Height: 800},
+	}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	// Child should be 10em * (16 * 1.5 * 2) = 10 * 48 = 480px
+	if len(layoutTree.Children) == 0 {
+		t.Fatal("Expected child box")
+	}
+	childBox := layoutTree.Children[0]
+	expectedWidth := 10.0 * 16.0 * 1.5 * 2.0 // = 480
+	if math.Abs(childBox.Dimensions.Content.Width-expectedWidth) > 0.01 {
+		t.Errorf("Nested em resolution: expected %.2f, got %.2f", expectedWidth, childBox.Dimensions.Content.Width)
+	}
+}
+
+// TestPercentageHeight tests that height: 50% resolves against containing block height.
+func TestPercentageHeight(t *testing.T) {
+	root := &html.Node{
+		TagName: "div",
+		Type:    html.ElementNode,
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "div", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "height", Value: "50%"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 200},
+	}
+	layoutTree.Layout(containingBlock)
+
+	expectedHeight := 100.0 // 50% of 200
+	if math.Abs(layoutTree.Dimensions.Content.Height-expectedHeight) > 0.01 {
+		t.Errorf("Percentage height: expected %.2f, got %.2f", expectedHeight, layoutTree.Dimensions.Content.Height)
+	}
+}
+
+// TestTextMetricsInterface verifies FallbackMeasurer produces expected widths.
+func TestTextMetricsInterface(t *testing.T) {
+	m := &FallbackMeasurer{}
+	metrics := m.MeasureText("Hello", "", 16.0)
+	expected := float64(5) * 16.0 * 0.6
+	if math.Abs(metrics.Width-expected) > 0.01 {
+		t.Errorf("FallbackMeasurer: expected width %.2f, got %.2f", expected, metrics.Width)
+	}
+	if metrics.Height != 16.0 {
+		t.Errorf("FallbackMeasurer: expected height 16, got %.2f", metrics.Height)
+	}
+}
+
+// TestMultiLineWrappingHeight verifies that multi-line text boxes accumulate height across all lines.
+func TestMultiLineWrappingHeight(t *testing.T) {
+	m := &FallbackMeasurer{}
+	// Each word is ~4 chars * 16 * 0.6 = 38.4px. With maxWidth=50, "The" fits alone, etc.
+	lines := WordWrap("The quick brown fox", "", 16.0, 50.0, m)
+	if len(lines) <= 1 {
+		t.Errorf("Expected multiple lines for narrow container, got %d", len(lines))
 	}
 }

@@ -45,11 +45,14 @@ func buildBoxTree(styledNode *style.StyledNode) *LayoutBox {
 					StyledNode: nil,
 					Dimensions: Dimensions{},
 					Children:   []*LayoutBox{},
+					Parent:     box,
 				}
 				box.Children = append(box.Children, anonymousBox)
 			}
+			childBox.Parent = anonymousBox
 			anonymousBox.Children = append(anonymousBox.Children, childBox)
 		} else {
+			childBox.Parent = box
 			box.Children = append(box.Children, childBox)
 		}
 	}
