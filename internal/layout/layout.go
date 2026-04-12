@@ -24,11 +24,23 @@ func (box *LayoutBox) LayoutWithContext(containingBlock Dimensions, ctx *LayoutC
 		box.layoutInline(containingBlock, ctx)
 	} else if box.BoxType == AnonymousBox {
 		box.layoutAnonymous(containingBlock, ctx)
+	} else if box.BoxType == PositionedBox {
+		// Absolute and fixed boxes are laid out by their containing block in Pass 2.
+		// Nothing to do here during normal flow.
+		return
+	} else if box.BoxType == FlexBox {
+		box.layoutFlex(containingBlock, ctx)
 	}
 }
 
 func (box *LayoutBox) layoutBlock(containingBlock Dimensions, ctx *LayoutContext) {
 	box.calculateBlockDimensions(containingBlock, ctx)
+
+	// Push this box onto the positioned ancestor stack if it is a positioned element
+	isPositioned := box.PositionType == "relative" || box.PositionType == "absolute" || box.PositionType == "fixed"
+	if isPositioned {
+		ctx.PositionedAncestors = append(ctx.PositionedAncestors, box)
+	}
 
 	containingBlockForChildren := box.Dimensions
 	containingBlockForChildren.Content.Height = 0
@@ -36,6 +48,15 @@ func (box *LayoutBox) layoutBlock(containingBlock Dimensions, ctx *LayoutContext
 
 	var previousMarginBottom float64
 	for i, child := range box.Children {
+		// Defer absolute/fixed children to Pass 2
+		if child.PositionType == "absolute" || child.PositionType == "fixed" {
+			nearest := nearestPositionedAncestor(ctx)
+			if nearest != nil {
+				nearest.DeferredAbsolute = append(nearest.DeferredAbsolute, child)
+			}
+			continue
+		}
+
 		childMarginTop := ParseLengthWithContext(child.getMarginTop(), 0, box, ctx)
 		if i > 0 {
 			childMarginTop = collapseMargins(previousMarginBottom, childMarginTop)
@@ -50,8 +71,23 @@ func (box *LayoutBox) layoutBlock(containingBlock Dimensions, ctx *LayoutContext
 		previousMarginBottom = child.Dimensions.Margin.Bottom
 	}
 
+	totalChildrenHeight := containingBlockForChildren.Content.Y - box.Dimensions.Content.Y
+	box.ChildrenHeight = totalChildrenHeight
 	if box.getHeight() == "auto" {
-		box.Dimensions.Content.Height = containingBlockForChildren.Content.Y - box.Dimensions.Content.Y
+		box.Dimensions.Content.Height = totalChildrenHeight
+	}
+
+	// Pop from positioned ancestor stack and layout deferred absolute/fixed children
+	if isPositioned {
+		if len(ctx.PositionedAncestors) > 0 {
+			ctx.PositionedAncestors = ctx.PositionedAncestors[:len(ctx.PositionedAncestors)-1]
+		}
+		box.layoutDeferredAbsolute(ctx)
+	}
+
+	// Apply relative offset after layout is complete
+	if box.PositionType == "relative" {
+		box.applyRelativeOffset(ctx)
 	}
 }
 
@@ -548,4 +584,410 @@ func getParentBox(box *LayoutBox) *LayoutBox {
 		return nil
 	}
 	return box.Parent
+}
+
+// nearestPositionedAncestor returns the top of the PositionedAncestors stack, or nil.
+func nearestPositionedAncestor(ctx *LayoutContext) *LayoutBox {
+	if len(ctx.PositionedAncestors) == 0 {
+		return nil
+	}
+	return ctx.PositionedAncestors[len(ctx.PositionedAncestors)-1]
+}
+
+// viewportDimensions returns a Dimensions representing the viewport.
+func viewportDimensions(ctx *LayoutContext) Dimensions {
+	return Dimensions{Content: Rect{X: 0, Y: 0, Width: ctx.ViewportWidth, Height: ctx.ViewportHeight}}
+}
+
+// layoutDeferredAbsolute lays out all absolute/fixed children deferred to this box.
+func (box *LayoutBox) layoutDeferredAbsolute(ctx *LayoutContext) {
+	for _, child := range box.DeferredAbsolute {
+		cb := box.Dimensions // containing block is this box
+		if child.PositionType == "fixed" {
+			cb = viewportDimensions(ctx)
+		}
+		child.layoutAbsolute(cb, ctx)
+	}
+}
+
+// layoutAbsolute sizes and positions an absolute or fixed box within its containing block.
+func (box *LayoutBox) layoutAbsolute(containingBlock Dimensions, ctx *LayoutContext) {
+	// Calculate width
+	w := box.getWidth()
+	if w != "" && w != "auto" {
+		box.Dimensions.Content.Width = ParseLengthWithContext(w, containingBlock.Content.Width, box, ctx)
+	} else {
+		box.Dimensions.Content.Width = 0 // shrink-to-content placeholder
+	}
+
+	// Calculate margins, borders, padding
+	box.calculateBlockWidth(containingBlock, ctx)
+	box.calculateBlockPosition(containingBlock, ctx)
+
+	// Set containing block for children
+	containingBlockForChildren := box.Dimensions
+	containingBlockForChildren.Content.Height = 0
+	containingBlockForChildren.Content.Y = box.Dimensions.Content.Y
+
+	// Push this box onto positioned ancestor stack for nested absolute children
+	if box.PositionType == "absolute" || box.PositionType == "fixed" {
+		ctx.PositionedAncestors = append(ctx.PositionedAncestors, box)
+	}
+
+	// Lay out children to determine height
+	for _, child := range box.Children {
+		if child.PositionType == "absolute" || child.PositionType == "fixed" {
+			nearest := nearestPositionedAncestor(ctx)
+			if nearest != nil {
+				nearest.DeferredAbsolute = append(nearest.DeferredAbsolute, child)
+			}
+			continue
+		}
+		child.LayoutWithContext(containingBlockForChildren, ctx)
+		marginBox := child.Dimensions.MarginBox()
+		containingBlockForChildren.Content.Y += marginBox.Height
+		containingBlockForChildren.Content.Height += marginBox.Height
+	}
+
+	// Pop from positioned ancestor stack
+	if box.PositionType == "absolute" || box.PositionType == "fixed" {
+		if len(ctx.PositionedAncestors) > 0 {
+			ctx.PositionedAncestors = ctx.PositionedAncestors[:len(ctx.PositionedAncestors)-1]
+		}
+		box.layoutDeferredAbsolute(ctx)
+	}
+
+	// Calculate height
+	height := box.getHeight()
+	if height == "auto" {
+		box.Dimensions.Content.Height = containingBlockForChildren.Content.Height
+	} else {
+		box.Dimensions.Content.Height = ParseLengthWithContext(height, containingBlock.Content.Height, box, ctx)
+	}
+
+	// Calculate border/padding bottom
+	borderBottom := ParseLengthWithContext(box.getBorderBottom(), 0, box, ctx)
+	paddingBottom := ParseLengthWithContext(box.getPaddingBottom(), 0, box, ctx)
+	marginBottom := ParseLengthWithContext(box.getMarginBottom(), 0, box, ctx)
+	box.Dimensions.Border.Bottom = borderBottom
+	box.Dimensions.Padding.Bottom = paddingBottom
+	box.Dimensions.Margin.Bottom = marginBottom
+
+	// Resolve top/left/bottom/right to position within containing block
+	top := box.getValue("top")
+	left := box.getValue("left")
+	bottom := box.getValue("bottom")
+	right := box.getValue("right")
+
+	cbLeft := containingBlock.Content.X
+	cbTop := containingBlock.Content.Y
+	cbW := containingBlock.Content.Width
+	cbH := containingBlock.Content.Height
+
+	if left != "" && left != "auto" {
+		box.Dimensions.Content.X = cbLeft + box.Dimensions.Margin.Left + box.Dimensions.Border.Left + box.Dimensions.Padding.Left + ParseLengthWithContext(left, cbW, box, ctx)
+	} else if right != "" && right != "auto" {
+		box.Dimensions.Content.X = cbLeft + cbW - box.Dimensions.Margin.Right - box.Dimensions.Border.Right - box.Dimensions.Padding.Right - box.Dimensions.Content.Width - ParseLengthWithContext(right, cbW, box, ctx)
+	}
+	if top != "" && top != "auto" {
+		box.Dimensions.Content.Y = cbTop + box.Dimensions.Margin.Top + box.Dimensions.Border.Top + box.Dimensions.Padding.Top + ParseLengthWithContext(top, cbH, box, ctx)
+	} else if bottom != "" && bottom != "auto" {
+		box.Dimensions.Content.Y = cbTop + cbH - box.Dimensions.Margin.Bottom - box.Dimensions.Border.Bottom - box.Dimensions.Padding.Bottom - box.Dimensions.Content.Height - ParseLengthWithContext(bottom, cbH, box, ctx)
+	}
+}
+
+// applyRelativeOffset shifts a relatively positioned box by its top/left/bottom/right offsets.
+func (box *LayoutBox) applyRelativeOffset(ctx *LayoutContext) {
+	top := box.getValue("top")
+	left := box.getValue("left")
+	bottom := box.getValue("bottom")
+	right := box.getValue("right")
+
+	if top != "" && top != "auto" {
+		box.Dimensions.Content.Y += ParseLengthWithContext(top, 0, box, ctx)
+	} else if bottom != "" && bottom != "auto" {
+		box.Dimensions.Content.Y -= ParseLengthWithContext(bottom, 0, box, ctx)
+	}
+	if left != "" && left != "auto" {
+		box.Dimensions.Content.X += ParseLengthWithContext(left, 0, box, ctx)
+	} else if right != "" && right != "auto" {
+		box.Dimensions.Content.X -= ParseLengthWithContext(right, 0, box, ctx)
+	}
+}
+
+// --- Flex Layout ---
+
+// resolveFlexConfig reads flex container properties from the box's styled node.
+func (box *LayoutBox) resolveFlexConfig() FlexConfig {
+	dir := box.getValue("flex-direction")
+	if dir == "" {
+		dir = "row"
+	}
+	wrap := box.getValue("flex-wrap")
+	if wrap == "" {
+		wrap = "nowrap"
+	}
+	jc := box.getValue("justify-content")
+	if jc == "" {
+		jc = "flex-start"
+	}
+	ai := box.getValue("align-items")
+	if ai == "" {
+		ai = "stretch"
+	}
+	return FlexConfig{Direction: dir, Wrap: wrap, JustifyContent: jc, AlignItems: ai}
+}
+
+// resolveFlexItemBasis computes the base size of a flex item along the main axis.
+func resolveFlexItemBasis(item *LayoutBox, mainAxisSize float64, ctx *LayoutContext) float64 {
+	basis := item.getValue("flex-basis")
+	if basis == "" || basis == "auto" {
+		w := item.getValue("width")
+		if w != "" && w != "auto" {
+			return ParseLengthWithContext(w, mainAxisSize, item, ctx)
+		}
+		return 0 // shrink-to-content; filled after child layout
+	}
+	return ParseLengthWithContext(basis, mainAxisSize, item, ctx)
+}
+
+// layoutFlex implements the CSS Flexbox layout algorithm.
+func (box *LayoutBox) layoutFlex(containingBlock Dimensions, ctx *LayoutContext) {
+	// --- Container sizing ---
+	box.calculateBlockWidth(containingBlock, ctx)
+	box.calculateBlockPosition(containingBlock, ctx)
+	box.calculateBlockHeight(containingBlock, ctx)
+
+	cfg := box.resolveFlexConfig()
+	isRow := cfg.Direction == "row" || cfg.Direction == "row-reverse"
+
+	mainSize := box.Dimensions.Content.Width
+	if !isRow {
+		mainSize = box.Dimensions.Content.Height
+	}
+
+	// --- Step 1: resolve base sizes and gather items ---
+	type flexItem struct {
+		box       *LayoutBox
+		baseSize  float64
+		grow      float64
+		shrink    float64
+		crossSize float64
+	}
+	items := make([]flexItem, 0, len(box.Children))
+	for _, child := range box.Children {
+		if child == nil {
+			continue
+		}
+		// Skip positioned children in flex layout
+		if child.PositionType == "absolute" || child.PositionType == "fixed" {
+			nearest := nearestPositionedAncestor(ctx)
+			if nearest != nil {
+				nearest.DeferredAbsolute = append(nearest.DeferredAbsolute, child)
+			}
+			continue
+		}
+		grow := ParseLengthWithContext(child.getValue("flex-grow"), 0, child, ctx)
+		shrink := ParseLengthWithContext(child.getValue("flex-shrink"), 1, child, ctx)
+		base := resolveFlexItemBasis(child, mainSize, ctx)
+		items = append(items, flexItem{box: child, baseSize: base, grow: grow, shrink: shrink})
+	}
+
+	// --- Step 2: lay out each item to get intrinsic cross size ---
+	for i := range items {
+		cb := box.Dimensions
+		if isRow {
+			if items[i].baseSize > 0 {
+				cb.Content.Width = items[i].baseSize
+			}
+		} else {
+			if items[i].baseSize > 0 {
+				cb.Content.Height = items[i].baseSize
+			}
+		}
+		items[i].box.LayoutWithContext(cb, ctx)
+		if isRow {
+			if items[i].baseSize == 0 {
+				items[i].baseSize = items[i].box.Dimensions.MarginBox().Width
+			}
+			items[i].crossSize = items[i].box.Dimensions.MarginBox().Height
+		} else {
+			if items[i].baseSize == 0 {
+				items[i].baseSize = items[i].box.Dimensions.MarginBox().Height
+			}
+			items[i].crossSize = items[i].box.Dimensions.MarginBox().Width
+		}
+	}
+
+	// --- Step 3: wrap lines ---
+	type flexLine struct {
+		items     []int
+		mainUsed  float64
+		crossSize float64
+	}
+	var lines []flexLine
+	if cfg.Wrap == "nowrap" {
+		line := flexLine{}
+		for i := range items {
+			line.items = append(line.items, i)
+			line.mainUsed += items[i].baseSize
+		}
+		lines = []flexLine{line}
+	} else {
+		current := flexLine{}
+		for i := range items {
+			if current.mainUsed+items[i].baseSize > mainSize && len(current.items) > 0 {
+				lines = append(lines, current)
+				current = flexLine{}
+			}
+			current.items = append(current.items, i)
+			current.mainUsed += items[i].baseSize
+		}
+		if len(current.items) > 0 {
+			lines = append(lines, current)
+		}
+	}
+
+	// --- Step 4: grow/shrink within each line ---
+	for li := range lines {
+		free := mainSize - lines[li].mainUsed
+		if free > 0 {
+			totalGrow := 0.0
+			for _, idx := range lines[li].items {
+				totalGrow += items[idx].grow
+			}
+			if totalGrow > 0 {
+				for _, idx := range lines[li].items {
+					items[idx].baseSize += free * (items[idx].grow / totalGrow)
+				}
+			}
+		} else if free < 0 {
+			totalShrink := 0.0
+			for _, idx := range lines[li].items {
+				totalShrink += items[idx].shrink
+			}
+			if totalShrink > 0 {
+				for _, idx := range lines[li].items {
+					items[idx].baseSize += free * (items[idx].shrink / totalShrink)
+					if items[idx].baseSize < 0 {
+						items[idx].baseSize = 0
+					}
+				}
+			}
+		}
+		// compute line cross size
+		for _, idx := range lines[li].items {
+			if items[idx].crossSize > lines[li].crossSize {
+				lines[li].crossSize = items[idx].crossSize
+			}
+		}
+	}
+
+	// --- Step 5: position items ---
+	crossOrigin := box.Dimensions.Content.Y
+	if !isRow {
+		crossOrigin = box.Dimensions.Content.X
+	}
+
+	for _, line := range lines {
+		// justify-content offsets
+		usedMain := 0.0
+		for _, idx := range line.items {
+			usedMain += items[idx].baseSize
+		}
+		freeMain := mainSize - usedMain
+		var startOffset, gap float64
+		switch cfg.JustifyContent {
+		case "flex-end":
+			startOffset = freeMain
+		case "center":
+			startOffset = freeMain / 2
+		case "space-between":
+			if len(line.items) > 1 {
+				gap = freeMain / float64(len(line.items)-1)
+			}
+		case "space-around":
+			if len(line.items) > 0 {
+				gap = freeMain / float64(len(line.items))
+				startOffset = gap / 2
+			}
+		}
+
+		mainCursor := startOffset
+		if isRow {
+			mainCursor += box.Dimensions.Content.X
+		} else {
+			mainCursor += box.Dimensions.Content.Y
+		}
+
+		for _, idx := range line.items {
+			item := items[idx]
+			// Re-layout with final main-axis size to get correct cross size.
+			finalCB := box.Dimensions
+			if isRow {
+				finalCB.Content.Width = item.baseSize
+				finalCB.Content.X = mainCursor
+				finalCB.Content.Y = crossOrigin
+			} else {
+				finalCB.Content.Height = item.baseSize
+				finalCB.Content.Y = mainCursor
+				finalCB.Content.X = crossOrigin
+			}
+			item.box.LayoutWithContext(finalCB, ctx)
+
+			// align-items cross placement
+			if isRow {
+				switch cfg.AlignItems {
+				case "center":
+					item.box.Dimensions.Content.Y = crossOrigin + (line.crossSize-item.box.Dimensions.MarginBox().Height)/2
+				case "flex-end":
+					item.box.Dimensions.Content.Y = crossOrigin + line.crossSize - item.box.Dimensions.MarginBox().Height
+				case "stretch":
+					stretchH := line.crossSize - item.box.Dimensions.Margin.Top - item.box.Dimensions.Margin.Bottom - item.box.Dimensions.Padding.Top - item.box.Dimensions.Padding.Bottom - item.box.Dimensions.Border.Top - item.box.Dimensions.Border.Bottom
+					if stretchH > 0 {
+						item.box.Dimensions.Content.Height = stretchH
+					}
+				}
+				mainCursor += item.box.Dimensions.MarginBox().Width + gap
+			} else {
+				switch cfg.AlignItems {
+				case "center":
+					item.box.Dimensions.Content.X = crossOrigin + (line.crossSize-item.box.Dimensions.MarginBox().Width)/2
+				case "flex-end":
+					item.box.Dimensions.Content.X = crossOrigin + line.crossSize - item.box.Dimensions.MarginBox().Width
+				case "stretch":
+					stretchW := line.crossSize - item.box.Dimensions.Margin.Left - item.box.Dimensions.Margin.Right - item.box.Dimensions.Padding.Left - item.box.Dimensions.Padding.Right - item.box.Dimensions.Border.Left - item.box.Dimensions.Border.Right
+					if stretchW > 0 {
+						item.box.Dimensions.Content.Width = stretchW
+					}
+				}
+				mainCursor += item.box.Dimensions.MarginBox().Height + gap
+			}
+		}
+
+		if isRow {
+			crossOrigin += line.crossSize
+		} else {
+			crossOrigin += line.crossSize
+		}
+	}
+
+	// --- Step 6: set container height (if auto) ---
+	if box.getHeight() == "auto" {
+		if isRow {
+			totalCross := 0.0
+			for _, line := range lines {
+				totalCross += line.crossSize
+			}
+			box.Dimensions.Content.Height = totalCross
+		} else {
+			totalMain := 0.0
+			for _, line := range lines {
+				for _, idx := range line.items {
+					totalMain += items[idx].baseSize
+				}
+			}
+			box.Dimensions.Content.Height = totalMain
+		}
+	}
 }

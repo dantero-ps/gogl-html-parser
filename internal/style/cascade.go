@@ -2,6 +2,7 @@ package style
 
 import (
 	"goglweb/internal/parser/html"
+	"slices"
 	"strings"
 )
 
@@ -9,9 +10,11 @@ func matches(node *html.Node, selector string) bool {
 	if selector == "*" {
 		return true
 	}
+
 	if node.TagName == selector {
 		return true
 	}
+
 	if strings.HasPrefix(selector, ".") {
 		classValue := node.Attr["class"]
 		if classValue == "" {
@@ -20,14 +23,10 @@ func matches(node *html.Node, selector string) bool {
 
 		classes := strings.Fields(classValue)
 		targetClass := selector[1:]
-		for _, cls := range classes {
-			if cls == targetClass {
-				return true
-			}
-		}
 
-		return false
+		return slices.Contains(classes, targetClass)
 	}
+
 	if strings.HasPrefix(selector, "#") {
 		idValue := node.Attr["id"]
 		if idValue == "" {
@@ -35,5 +34,6 @@ func matches(node *html.Node, selector string) bool {
 		}
 		return idValue == selector[1:]
 	}
+
 	return false
 }

@@ -18,6 +18,7 @@ type Renderer struct {
 	LayoutCtx       *layout.LayoutContext
 	ContainingBlock layout.Dimensions
 	NeedsLayout     bool
+	NeedsRepaint    bool
 }
 
 // NewRenderer creates a new renderer
@@ -40,8 +41,45 @@ func NewRenderer(htmlRoot *html.Node, stylesheet *css.Stylesheet, viewportWidth,
 	return r
 }
 
+// collectScrollOffsets walks the layout tree and saves scroll offsets for
+// every scrollable box, keyed by its stable *html.Node pointer.
+func collectScrollOffsets(box *layout.LayoutBox, out map[*html.Node][2]float64) {
+	if box == nil {
+		return
+	}
+	if box.IsScrollable() && box.StyledNode != nil && box.StyledNode.Node != nil {
+		out[box.StyledNode.Node] = [2]float64{box.ScrollOffsetX, box.ScrollOffsetY}
+	}
+	for _, c := range box.Children {
+		collectScrollOffsets(c, out)
+	}
+}
+
+// restoreScrollOffsets walks the rebuilt layout tree and re-applies saved offsets
+// by matching the stable *html.Node pointer.
+func restoreScrollOffsets(box *layout.LayoutBox, saved map[*html.Node][2]float64) {
+	if box == nil {
+		return
+	}
+	if box.IsScrollable() && box.StyledNode != nil && box.StyledNode.Node != nil {
+		if offsets, ok := saved[box.StyledNode.Node]; ok {
+			box.ScrollOffsetX = offsets[0]
+			box.ScrollOffsetY = offsets[1]
+		}
+	}
+	for _, c := range box.Children {
+		restoreScrollOffsets(c, saved)
+	}
+}
+
 // Rebuild recreates the entire rendering pipeline
 func (r *Renderer) Rebuild() {
+	// Save scroll offsets before rebuilding so they survive the new layout tree.
+	scrollOffsets := make(map[*html.Node][2]float64)
+	if r.LayoutTree != nil {
+		collectScrollOffsets(r.LayoutTree, scrollOffsets)
+	}
+
 	// 1. Rebuild styled tree
 	r.StyledTree = style.BuildStyledTree(r.HTMLRoot, r.Stylesheet)
 
@@ -51,15 +89,21 @@ func (r *Renderer) Rebuild() {
 	// 3. Calculate layout
 	r.LayoutTree.LayoutWithContext(r.ContainingBlock, r.LayoutCtx)
 
-	// 4. Create display list
+	// Restore scroll offsets onto the new layout tree.
+	if len(scrollOffsets) > 0 {
+		restoreScrollOffsets(r.LayoutTree, scrollOffsets)
+	}
+
+	// 4. Create display list (after restoring offsets so BeginScrollCmd gets correct values)
 	r.DisplayList = render.BuildDisplayList(r.LayoutTree)
 
 	r.NeedsLayout = false
 }
 
-// MarkDirty marks that layout needs to be recalculated
+// MarkDirty marks that layout needs to be recalculated and the screen repainted.
 func (r *Renderer) MarkDirty() {
 	r.NeedsLayout = true
+	r.NeedsRepaint = true
 }
 
 // UpdateStylesheet updates the stylesheet and rebuilds

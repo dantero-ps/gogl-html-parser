@@ -21,11 +21,15 @@ type Painter interface {
 	DrawText(text string, x, y float64, fontSize float64, color Color, fontFamily string)
 	SetClip(rect layout.Rect)
 	ClearClip()
+	BeginScroll(clipRect layout.Rect, offsetX, offsetY float64)
+	EndScroll()
 }
 
 // MockPainter records operations for testing purposes.
 type MockPainter struct {
-	Operations []string
+	Operations       []string
+	BeginScrollCalls int
+	EndScrollCalls   int
 }
 
 func (p *MockPainter) FillRect(rect layout.Rect, color Color) {
@@ -46,6 +50,16 @@ func (p *MockPainter) SetClip(rect layout.Rect) {
 
 func (p *MockPainter) ClearClip() {
 	p.Operations = append(p.Operations, "ClearClip")
+}
+
+func (p *MockPainter) BeginScroll(clipRect layout.Rect, offsetX, offsetY float64) {
+	p.BeginScrollCalls++
+	p.Operations = append(p.Operations, fmt.Sprintf("BeginScroll: ClipRect: %+v OffsetX: %.2f OffsetY: %.2f", clipRect, offsetX, offsetY))
+}
+
+func (p *MockPainter) EndScroll() {
+	p.EndScrollCalls++
+	p.Operations = append(p.Operations, "EndScroll")
 }
 
 var namedColors = map[string]Color{

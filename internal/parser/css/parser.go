@@ -1,5 +1,7 @@
 package css
 
+import "strings"
+
 type Parser struct {
 	tokenizer *Tokenizer
 	curToken  Token
@@ -61,12 +63,12 @@ func (p *Parser) parseDeclaration() Declaration {
 	}
 
 	// Combine values
-	val := ""
+	var val strings.Builder
 	for i, part := range valueParts {
 		if i > 0 {
-			val += " "
+			val.WriteString(" ")
 		}
-		val += part
+		val.WriteString(part)
 	}
 
 	// Skip semicolon if present
@@ -74,5 +76,5 @@ func (p *Parser) parseDeclaration() Declaration {
 		p.nextToken()
 	}
 
-	return Declaration{Property: prop, Value: val}
+	return Declaration{Property: prop, Value: val.String()}
 }

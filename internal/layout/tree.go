@@ -16,6 +16,8 @@ func buildBoxTree(styledNode *style.StyledNode) *LayoutBox {
 		boxType = BlockBox
 	case style.Inline:
 		boxType = InlineBox
+	case style.Flex:
+		boxType = FlexBox
 	case style.None:
 		return nil
 	default:
@@ -23,10 +25,35 @@ func buildBoxTree(styledNode *style.StyledNode) *LayoutBox {
 	}
 
 	box := &LayoutBox{
-		BoxType:    boxType,
-		StyledNode: styledNode,
-		Dimensions: Dimensions{},
-		Children:   []*LayoutBox{},
+		BoxType:      boxType,
+		StyledNode:   styledNode,
+		Dimensions:   Dimensions{},
+		Children:     []*LayoutBox{},
+		PositionType: "static",
+	}
+
+	// Read position property and adjust BoxType/PositionType accordingly
+	pos := ""
+	if styledNode.SpecifiedValues != nil {
+		pos = styledNode.SpecifiedValues["position"]
+	}
+	switch pos {
+	case "relative":
+		box.PositionType = "relative"
+		// relative stays in normal flow (BlockBox), just shifted later
+	case "absolute":
+		box.BoxType = PositionedBox
+		box.PositionType = "absolute"
+	case "fixed":
+		box.BoxType = PositionedBox
+		box.PositionType = "fixed"
+	}
+
+	// Read overflow property
+	if styledNode.SpecifiedValues != nil {
+		if overflow, ok := styledNode.SpecifiedValues["overflow"]; ok {
+			box.Overflow = overflow
+		}
 	}
 
 	for _, child := range styledNode.Children {
@@ -61,5 +88,8 @@ func buildBoxTree(styledNode *style.StyledNode) *LayoutBox {
 }
 
 func needsAnonymousBox(parent *LayoutBox, child *LayoutBox) bool {
+	if parent.BoxType == FlexBox {
+		return false
+	}
 	return parent.BoxType == BlockBox && child.BoxType == InlineBox
 }

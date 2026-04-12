@@ -732,3 +732,471 @@ func TestMultiLineWrappingHeight(t *testing.T) {
 		t.Errorf("Expected multiple lines for narrow container, got %d", len(lines))
 	}
 }
+
+// --- Plan 02-01: Positioned Layout Tests ---
+
+// TestPositionedRelativeOffset verifies that position:relative; top:20px; left:10px shifts the box
+// without affecting sibling positions.
+func TestPositionedRelativeOffset(t *testing.T) {
+	// Manually construct styled tree for precise control
+	parentNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	child1Node := &html.Node{TagName: "div", Type: html.ElementNode}
+	child2Node := &html.Node{TagName: "div", Type: html.ElementNode}
+	parentNode.Children = []*html.Node{child1Node, child2Node}
+
+	parentStyled := &style.StyledNode{
+		Node: parentNode,
+		SpecifiedValues: map[string]string{
+			"display": "block",
+			"width":   "800px",
+		},
+	}
+	child1Styled := &style.StyledNode{
+		Node: child1Node,
+		SpecifiedValues: map[string]string{
+			"display":  "block",
+			"width":    "100px",
+			"height":   "50px",
+			"position": "relative",
+			"top":      "20px",
+			"left":     "10px",
+		},
+	}
+	child2Styled := &style.StyledNode{
+		Node: child2Node,
+		SpecifiedValues: map[string]string{
+			"display": "block",
+			"width":   "100px",
+			"height":  "30px",
+		},
+	}
+	parentStyled.Children = []*style.StyledNode{child1Styled, child2Styled}
+
+	layoutTree := BuildLayoutTree(parentStyled)
+	ctx := NewLayoutContext(800, 600)
+	containingBlock := Dimensions{Content: Rect{X: 0, Y: 0, Width: 800, Height: 600}}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	if len(layoutTree.Children) < 2 {
+		t.Fatalf("Expected at least 2 children, got %d", len(layoutTree.Children))
+	}
+
+	child1 := layoutTree.Children[0]
+	child2 := layoutTree.Children[1]
+
+	// child1 should have position:relative with PositionType set
+	if child1.PositionType != "relative" {
+		t.Errorf("First child PositionType should be 'relative', got '%s'", child1.PositionType)
+	}
+
+	// child2 should be static
+	if child2.PositionType != "static" {
+		t.Errorf("Second child PositionType should be 'static', got '%s'", child2.PositionType)
+	}
+
+	// child1 should be shifted by (10, 20) from its normal position
+	// Normal position would be at Y=0, X=0 (first child in parent)
+	// After relative offset: X=10, Y=20
+	if child1.Dimensions.Content.X != 10 {
+		t.Errorf("First child X should be 10 (left:10px offset), got %.2f", child1.Dimensions.Content.X)
+	}
+	if child1.Dimensions.Content.Y != 20 {
+		t.Errorf("First child Y should be 20 (top:20px offset), got %.2f", child1.Dimensions.Content.Y)
+	}
+
+	// child2 should be at the normal flow position (Y = 0 + 50px height = 50)
+	// It should NOT be displaced by the relative offset of child1
+	normalFlowY := child1.Dimensions.Content.Y - 20 + child1.Dimensions.Content.Height // normal Y + height
+	if math.Abs(child2.Dimensions.Content.Y-normalFlowY) > 0.01 {
+		t.Errorf("Second child Y should be at normal flow position %.2f, got %.2f (sibling should be unaffected by relative offset)", normalFlowY, child2.Dimensions.Content.Y)
+	}
+}
+
+// TestPositionedAbsoluteBox verifies that an absolute child is positioned relative to its
+// nearest positioned ancestor, not the viewport.
+func TestPositionedAbsoluteBox(t *testing.T) {
+	// Build: outer block (800px) → inner block (position:relative, 200x100) → child (position:absolute, top:5px, left:5px, 50x50)
+	outerNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	innerNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	absNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	outerNode.Children = []*html.Node{innerNode}
+	innerNode.Children = []*html.Node{absNode}
+
+	outerStyled := &style.StyledNode{
+		Node: outerNode,
+		SpecifiedValues: map[string]string{
+			"display": "block",
+			"width":   "800px",
+		},
+	}
+	innerStyled := &style.StyledNode{
+		Node: innerNode,
+		SpecifiedValues: map[string]string{
+			"display":  "block",
+			"width":    "200px",
+			"height":   "100px",
+			"position": "relative",
+		},
+	}
+	absStyled := &style.StyledNode{
+		Node: absNode,
+		SpecifiedValues: map[string]string{
+			"display":  "block",
+			"width":    "50px",
+			"height":   "50px",
+			"position": "absolute",
+			"top":      "5px",
+			"left":     "5px",
+		},
+	}
+	outerStyled.Children = []*style.StyledNode{innerStyled}
+	innerStyled.Children = []*style.StyledNode{absStyled}
+
+	layoutTree := BuildLayoutTree(outerStyled)
+	ctx := NewLayoutContext(800, 600)
+	containingBlock := Dimensions{Content: Rect{X: 0, Y: 0, Width: 800, Height: 600}}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	if len(layoutTree.Children) < 1 {
+		t.Fatal("Expected at least 1 child (inner block)")
+	}
+	inner := layoutTree.Children[0]
+	innerContentX := inner.Dimensions.Content.X
+	innerContentY := inner.Dimensions.Content.Y
+
+	// Inner should have a deferred absolute child
+	if len(inner.DeferredAbsolute) < 1 {
+		t.Fatalf("Inner should have 1 deferred absolute child, got %d", len(inner.DeferredAbsolute))
+	}
+	absChild := inner.DeferredAbsolute[0]
+
+	// Absolute child should be positioned at (innerContentX+5, innerContentY+5)
+	expectedX := innerContentX + 5
+	expectedY := innerContentY + 5
+	if math.Abs(absChild.Dimensions.Content.X-expectedX) > 0.01 {
+		t.Errorf("Absolute child X should be %.2f (inner X + 5), got %.2f", expectedX, absChild.Dimensions.Content.X)
+	}
+	if math.Abs(absChild.Dimensions.Content.Y-expectedY) > 0.01 {
+		t.Errorf("Absolute child Y should be %.2f (inner Y + 5), got %.2f", expectedY, absChild.Dimensions.Content.Y)
+	}
+
+	// Inner block height should still be 100 (absolute child does not expand it)
+	if math.Abs(inner.Dimensions.Content.Height-100) > 0.01 {
+		t.Errorf("Inner block height should be 100, got %.2f", inner.Dimensions.Content.Height)
+	}
+}
+
+// TestPositionedFixedBox verifies that a fixed element is positioned relative to the viewport.
+func TestPositionedFixedBox(t *testing.T) {
+	// Build: outer block (800x600) → inner block (position:relative, 200x100, margin-left:100, margin-top:50) → fixed child (top:0, right:0, 100x40)
+	outerNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	innerNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	fixedNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	outerNode.Children = []*html.Node{innerNode}
+	innerNode.Children = []*html.Node{fixedNode}
+
+	outerStyled := &style.StyledNode{
+		Node: outerNode,
+		SpecifiedValues: map[string]string{
+			"display": "block",
+			"width":   "800px",
+		},
+	}
+	innerStyled := &style.StyledNode{
+		Node: innerNode,
+		SpecifiedValues: map[string]string{
+			"display":     "block",
+			"width":       "200px",
+			"height":      "100px",
+			"position":    "relative",
+			"margin-left": "100px",
+			"margin-top":  "50px",
+		},
+	}
+	fixedStyled := &style.StyledNode{
+		Node: fixedNode,
+		SpecifiedValues: map[string]string{
+			"display":  "block",
+			"width":    "100px",
+			"height":   "40px",
+			"position": "fixed",
+			"top":      "0px",
+			"right":    "0px",
+		},
+	}
+	outerStyled.Children = []*style.StyledNode{innerStyled}
+	innerStyled.Children = []*style.StyledNode{fixedStyled}
+
+	layoutTree := BuildLayoutTree(outerStyled)
+	ctx := NewLayoutContext(800, 600)
+	containingBlock := Dimensions{Content: Rect{X: 0, Y: 0, Width: 800, Height: 600}}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	inner := layoutTree.Children[0]
+
+	// Inner should have the fixed child in DeferredAbsolute
+	if len(inner.DeferredAbsolute) < 1 {
+		t.Fatalf("Inner should have 1 deferred fixed child, got %d", len(inner.DeferredAbsolute))
+	}
+	fixedChild := inner.DeferredAbsolute[0]
+
+	// Fixed child should be at viewport top-right: X = 800 - 100 = 700, Y = 0
+	if math.Abs(fixedChild.Dimensions.Content.X-700) > 0.01 {
+		t.Errorf("Fixed child X should be 700 (viewport right - width), got %.2f", fixedChild.Dimensions.Content.X)
+	}
+	if math.Abs(fixedChild.Dimensions.Content.Y-0) > 0.01 {
+		t.Errorf("Fixed child Y should be 0 (viewport top), got %.2f", fixedChild.Dimensions.Content.Y)
+	}
+}
+
+// --- Plan 02-02: Flexbox Layout Tests ---
+
+// TestFlexRowDistribution verifies that three 100px children in a 300px flex row
+// are distributed left to right at X positions 0, 100, 200.
+func TestFlexRowDistribution(t *testing.T) {
+	containerNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	childNodes := make([]*html.Node, 3)
+	for i := range 3 {
+		childNodes[i] = &html.Node{TagName: "div", Type: html.ElementNode}
+	}
+	containerNode.Children = []*html.Node{childNodes[0], childNodes[1], childNodes[2]}
+
+	childStyles := make([]*style.StyledNode, 3)
+	for i := range 3 {
+		childStyles[i] = &style.StyledNode{
+			Node: childNodes[i],
+			SpecifiedValues: map[string]string{
+				"display": "block",
+				"width":   "100px",
+				"height":  "50px",
+			},
+		}
+	}
+
+	containerStyled := &style.StyledNode{
+		Node: containerNode,
+		SpecifiedValues: map[string]string{
+			"display": "flex",
+			"width":   "300px",
+		},
+		Children: childStyles,
+	}
+
+	layoutTree := BuildLayoutTree(containerStyled)
+	ctx := NewLayoutContext(800, 600)
+	containingBlock := Dimensions{Content: Rect{X: 0, Y: 0, Width: 800, Height: 600}}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	if layoutTree.BoxType != FlexBox {
+		t.Fatalf("Container should be FlexBox, got %v", layoutTree.BoxType)
+	}
+	if len(layoutTree.Children) != 3 {
+		t.Fatalf("Expected 3 children, got %d", len(layoutTree.Children))
+	}
+
+	containerX := layoutTree.Dimensions.Content.X
+	for i, child := range layoutTree.Children {
+		expectedX := containerX + float64(i)*100
+		if math.Abs(child.Dimensions.Content.X-expectedX) > 0.01 {
+			t.Errorf("Child %d X should be %.2f, got %.2f", i, expectedX, child.Dimensions.Content.X)
+		}
+	}
+
+	// Container height should be 50 (tallest child)
+	if math.Abs(layoutTree.Dimensions.Content.Height-50) > 0.01 {
+		t.Errorf("Container height should be 50, got %.2f", layoutTree.Dimensions.Content.Height)
+	}
+}
+
+// TestFlexJustifyContentSpaceBetween verifies space-between distribution.
+func TestFlexJustifyContentSpaceBetween(t *testing.T) {
+	containerNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	child1Node := &html.Node{TagName: "div", Type: html.ElementNode}
+	child2Node := &html.Node{TagName: "div", Type: html.ElementNode}
+	containerNode.Children = []*html.Node{child1Node, child2Node}
+
+	containerStyled := &style.StyledNode{
+		Node: containerNode,
+		SpecifiedValues: map[string]string{
+			"display":         "flex",
+			"width":           "300px",
+			"justify-content": "space-between",
+		},
+		Children: []*style.StyledNode{
+			{Node: child1Node, SpecifiedValues: map[string]string{
+				"display": "block", "width": "50px", "height": "40px",
+			}},
+			{Node: child2Node, SpecifiedValues: map[string]string{
+				"display": "block", "width": "50px", "height": "40px",
+			}},
+		},
+	}
+
+	layoutTree := BuildLayoutTree(containerStyled)
+	ctx := NewLayoutContext(800, 600)
+	containingBlock := Dimensions{Content: Rect{X: 0, Y: 0, Width: 800, Height: 600}}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	containerX := layoutTree.Dimensions.Content.X
+	child1 := layoutTree.Children[0]
+	child2 := layoutTree.Children[1]
+
+	// First child at start (X = containerX)
+	if math.Abs(child1.Dimensions.Content.X-containerX) > 0.01 {
+		t.Errorf("Child 1 X should be %.2f, got %.2f", containerX, child1.Dimensions.Content.X)
+	}
+
+	// Second child at X = containerX + 250 (300 - 50)
+	expectedX2 := containerX + 250
+	if math.Abs(child2.Dimensions.Content.X-expectedX2) > 0.01 {
+		t.Errorf("Child 2 X should be %.2f, got %.2f", expectedX2, child2.Dimensions.Content.X)
+	}
+}
+
+// TestFlexAlignItemsCenter verifies vertical centering in a row flex container.
+func TestFlexAlignItemsCenter(t *testing.T) {
+	containerNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	childANode := &html.Node{TagName: "div", Type: html.ElementNode}
+	childBNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	containerNode.Children = []*html.Node{childANode, childBNode}
+
+	containerStyled := &style.StyledNode{
+		Node: containerNode,
+		SpecifiedValues: map[string]string{
+			"display":     "flex",
+			"width":       "300px",
+			"align-items": "center",
+		},
+		Children: []*style.StyledNode{
+			{Node: childANode, SpecifiedValues: map[string]string{
+				"display": "block", "width": "50px", "height": "100px",
+			}},
+			{Node: childBNode, SpecifiedValues: map[string]string{
+				"display": "block", "width": "50px", "height": "40px",
+			}},
+		},
+	}
+
+	layoutTree := BuildLayoutTree(containerStyled)
+	ctx := NewLayoutContext(800, 600)
+	containingBlock := Dimensions{Content: Rect{X: 0, Y: 0, Width: 800, Height: 600}}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	containerY := layoutTree.Dimensions.Content.Y
+	childA := layoutTree.Children[0]
+	childB := layoutTree.Children[1]
+
+	// Item A (100px tall) should be at container top (tallest)
+	if math.Abs(childA.Dimensions.Content.Y-containerY) > 0.01 {
+		t.Errorf("Item A Y should be %.2f (container top), got %.2f", containerY, childA.Dimensions.Content.Y)
+	}
+
+	// Item B (40px tall) should be centered: Y = containerY + (100-40)/2 = containerY + 30
+	expectedY := containerY + 30
+	if math.Abs(childB.Dimensions.Content.Y-expectedY) > 0.01 {
+		t.Errorf("Item B Y should be %.2f (centered), got %.2f", expectedY, childB.Dimensions.Content.Y)
+	}
+}
+
+// TestFlexGrowDistribution verifies that flex-grow distributes remaining space.
+func TestFlexGrowDistribution(t *testing.T) {
+	containerNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	childANode := &html.Node{TagName: "div", Type: html.ElementNode}
+	childBNode := &html.Node{TagName: "div", Type: html.ElementNode}
+	containerNode.Children = []*html.Node{childANode, childBNode}
+
+	containerStyled := &style.StyledNode{
+		Node: containerNode,
+		SpecifiedValues: map[string]string{
+			"display": "flex",
+			"width":   "300px",
+		},
+		Children: []*style.StyledNode{
+			{Node: childANode, SpecifiedValues: map[string]string{
+				"display":    "block",
+				"flex-basis": "50px",
+				"flex-grow":  "1",
+				"height":     "40px",
+			}},
+			{Node: childBNode, SpecifiedValues: map[string]string{
+				"display":    "block",
+				"flex-basis": "50px",
+				"flex-grow":  "2",
+				"height":     "40px",
+			}},
+		},
+	}
+
+	layoutTree := BuildLayoutTree(containerStyled)
+	ctx := NewLayoutContext(800, 600)
+	containingBlock := Dimensions{Content: Rect{X: 0, Y: 0, Width: 800, Height: 600}}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	childA := layoutTree.Children[0]
+	childB := layoutTree.Children[1]
+
+	// Free space = 300 - 50 - 50 = 200
+	// A gets 200 * (1/3) ≈ 66.67 → total ≈ 116.67
+	// B gets 200 * (2/3) ≈ 133.33 → total ≈ 183.33
+	expectedA := 50.0 + 200.0*(1.0/3.0)
+	expectedB := 50.0 + 200.0*(2.0/3.0)
+	if math.Abs(childA.Dimensions.Content.Width-expectedA) > 0.5 {
+		t.Errorf("Child A width should be ~%.2f, got %.2f", expectedA, childA.Dimensions.Content.Width)
+	}
+	if math.Abs(childB.Dimensions.Content.Width-expectedB) > 0.5 {
+		t.Errorf("Child B width should be ~%.2f, got %.2f", expectedB, childB.Dimensions.Content.Width)
+	}
+}
+
+// --- Plan 02-03: Overflow and Scroll Tests ---
+
+// TestClampScrollOffset verifies the scroll offset clamping helper.
+func TestClampScrollOffset(t *testing.T) {
+	// Negative offset clamped to 0
+	if ClampScrollOffset(-10, 400, 200) != 0 {
+		t.Errorf("ClampScrollOffset(-10, 400, 200) should be 0, got %.2f", ClampScrollOffset(-10, 400, 200))
+	}
+
+	// Offset exceeding max (400-200=200) clamped to 200
+	if ClampScrollOffset(300, 400, 200) != 200 {
+		t.Errorf("ClampScrollOffset(300, 400, 200) should be 200, got %.2f", ClampScrollOffset(300, 400, 200))
+	}
+
+	// Valid offset unchanged
+	if ClampScrollOffset(100, 400, 200) != 100 {
+		t.Errorf("ClampScrollOffset(100, 400, 200) should be 100, got %.2f", ClampScrollOffset(100, 400, 200))
+	}
+
+	// Content smaller than visible: max clamped to 0
+	if ClampScrollOffset(50, 100, 200) != 0 {
+		t.Errorf("ClampScrollOffset(50, 100, 200) should be 0, got %.2f", ClampScrollOffset(50, 100, 200))
+	}
+}
+
+// TestIsScrollable verifies the IsScrollable helper on LayoutBox.
+func TestIsScrollable(t *testing.T) {
+	box := &LayoutBox{}
+	if box.IsScrollable() {
+		t.Error("Empty overflow should not be scrollable")
+	}
+
+	box.Overflow = "visible"
+	if box.IsScrollable() {
+		t.Error("overflow:visible should not be scrollable")
+	}
+
+	box.Overflow = "hidden"
+	if box.IsScrollable() {
+		t.Error("overflow:hidden should not be scrollable")
+	}
+
+	box.Overflow = "scroll"
+	if !box.IsScrollable() {
+		t.Error("overflow:scroll should be scrollable")
+	}
+
+	box.Overflow = "auto"
+	if !box.IsScrollable() {
+		t.Error("overflow:auto should be scrollable")
+	}
+}

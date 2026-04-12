@@ -2,6 +2,7 @@ package render
 
 import (
 	"goglweb/internal/parser/html"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -51,6 +52,24 @@ func (c ClipRectCmd) Execute(p Painter) {
 	} else {
 		p.SetClip(c.Rect)
 	}
+}
+
+// BeginScrollCmd activates scroll clipping and translation for a scrollable container.
+type BeginScrollCmd struct {
+	ClipRect layout.Rect
+	OffsetX  float64
+	OffsetY  float64
+}
+
+func (c BeginScrollCmd) Execute(p Painter) {
+	p.BeginScroll(c.ClipRect, c.OffsetX, c.OffsetY)
+}
+
+// EndScrollCmd deactivates scroll clipping for a scrollable container.
+type EndScrollCmd struct{}
+
+func (c EndScrollCmd) Execute(p Painter) {
+	p.EndScroll()
 }
 
 // DisplayList maintains a sequence of drawing commands.
@@ -162,6 +181,17 @@ func renderBox(box *layout.LayoutBox, dl *DisplayList) {
 		dl.Add(ClipRectCmd{Rect: box.Dimensions.Content})
 	}
 
+	// 3b. Scrollable containers: emit BeginScroll/EndScroll
+	isScrollable := box.IsScrollable()
+	if isScrollable {
+		borderBox := box.Dimensions.BorderBox()
+		dl.Add(BeginScrollCmd{
+			ClipRect: borderBox,
+			OffsetX:  box.ScrollOffsetX,
+			OffsetY:  box.ScrollOffsetY,
+		})
+	}
+
 	// 4. Children (Recursive Traversal)
 	// Even though the prompt says post-order (children first), browser engines
 	// usually put children commands after parent background to ensure they are on top.
@@ -172,6 +202,11 @@ func renderBox(box *layout.LayoutBox, dl *DisplayList) {
 	// 5. Text Rendering
 	if box.StyledNode != nil && box.StyledNode.Node.Type == html.TextNode { // Assuming 0 is TextNode
 		RenderText(box, dl)
+	}
+
+	// End scroll after children and text
+	if isScrollable {
+		dl.Add(EndScrollCmd{})
 	}
 
 	// Clear clipping after children and text are drawn
@@ -205,10 +240,5 @@ func extractBorderColor(borderValue string) string {
 
 func isNamedColor(color string) bool {
 	namedColors := []string{"black", "white", "red", "green", "blue", "yellow", "cyan", "gray", "silver", "maroon", "navy", "orange", "purple"}
-	for _, nc := range namedColors {
-		if strings.ToLower(color) == nc {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(namedColors, strings.ToLower(color))
 }

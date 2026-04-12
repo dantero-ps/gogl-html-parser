@@ -2,6 +2,7 @@ package dom
 
 import (
 	"goglweb/internal/parser/html"
+	"slices"
 	"strings"
 )
 
@@ -91,7 +92,7 @@ func GetTextContent(node *html.Node) string {
 	}
 
 	// If element node, iteratively combine all text children's content
-	result := ""
+	var result strings.Builder
 	stack := []*html.Node{node}
 
 	for len(stack) > 0 {
@@ -100,14 +101,14 @@ func GetTextContent(node *html.Node) string {
 
 		for _, child := range current.Children {
 			if child.Type == html.TextNode {
-				result += child.Content
+				result.WriteString(child.Content)
 			} else {
 				stack = append(stack, child)
 			}
 		}
 	}
 
-	return result
+	return result.String()
 }
 
 // AddClass adds a class to a node
@@ -116,10 +117,8 @@ func AddClass(node *html.Node, className string) {
 		return
 	}
 	classes := GetClasses(node)
-	for _, c := range classes {
-		if c == className {
-			return // Zaten var
-		}
+	if slices.Contains(classes, className) {
+		return // Zaten var
 	}
 	classes = append(classes, className)
 	SetAttribute(node, "class", joinClasses(classes))
@@ -146,13 +145,7 @@ func ToggleClass(node *html.Node, className string) {
 		return
 	}
 	classes := GetClasses(node)
-	found := false
-	for _, c := range classes {
-		if c == className {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(classes, className)
 	if found {
 		RemoveClass(node, className)
 	} else {
@@ -174,12 +167,12 @@ func GetClasses(node *html.Node) []string {
 }
 
 func joinClasses(classes []string) string {
-	result := ""
+	var result strings.Builder
 	for i, c := range classes {
 		if i > 0 {
-			result += " "
+			result.WriteString(" ")
 		}
-		result += c
+		result.WriteString(c)
 	}
-	return result
+	return result.String()
 }

@@ -18,6 +18,7 @@ const (
 	Block  Display = "block"
 	Inline Display = "inline"
 	None   Display = "none"
+	Flex   Display = "flex"
 )
 
 func (sn *StyledNode) Display() Display {

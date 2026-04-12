@@ -8,11 +8,11 @@ import (
 func TestNestingDepthLimit(t *testing.T) {
 	// Create HTML with 300 nested divs — should not panic
 	var sb strings.Builder
-	for i := 0; i < 300; i++ {
+	for range 300 {
 		sb.WriteString("<div>")
 	}
 	sb.WriteString("deep")
-	for i := 0; i < 300; i++ {
+	for range 300 {
 		sb.WriteString("</div>")
 	}
 

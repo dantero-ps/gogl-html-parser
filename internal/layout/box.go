@@ -10,10 +10,11 @@ type Rect struct {
 }
 
 type LayoutContext struct {
-	RootFontSize   float64
-	ViewportWidth  float64
-	ViewportHeight float64
-	TextMeasurer   TextMeasurer
+	RootFontSize        float64
+	ViewportWidth       float64
+	ViewportHeight      float64
+	TextMeasurer        TextMeasurer
+	PositionedAncestors []*LayoutBox // stack; top is nearest positioned ancestor
 }
 
 func NewLayoutContext(viewportWidth, viewportHeight float64) *LayoutContext {
@@ -81,6 +82,8 @@ const (
 	BlockBox BoxType = iota
 	InlineBox
 	AnonymousBox
+	PositionedBox // position: absolute or fixed
+	FlexBox       // display: flex container
 )
 
 type LayoutBox struct {
@@ -90,4 +93,42 @@ type LayoutBox struct {
 	Children   []*LayoutBox
 	Parent     *LayoutBox
 	TextAscent float64 // distance from content top to baseline, set for text nodes
+
+	// Positioned layout fields
+	PositionType     string       // "static" | "relative" | "absolute" | "fixed"
+	DeferredAbsolute []*LayoutBox // absolute/fixed children deferred to second pass
+
+	// Scroll fields
+	ScrollOffsetX  float64 // pixels scrolled horizontally (positive = scrolled right)
+	ScrollOffsetY  float64 // pixels scrolled vertically (positive = scrolled down)
+	Overflow       string  // "" | "visible" | "hidden" | "scroll" | "auto"
+	ChildrenHeight float64 // total height occupied by children (used for scroll bounds)
+}
+
+// IsScrollable returns true if this box clips and scrolls its content.
+func (box *LayoutBox) IsScrollable() bool {
+	return box.Overflow == "scroll" || box.Overflow == "auto"
+}
+
+// ClampScrollOffset clamps a scroll offset to valid bounds.
+func ClampScrollOffset(offset, contentHeight, visibleHeight float64) float64 {
+	if offset < 0 {
+		return 0
+	}
+	max := contentHeight - visibleHeight
+	if max < 0 {
+		max = 0
+	}
+	if offset > max {
+		return max
+	}
+	return offset
+}
+
+// FlexConfig holds resolved flex container properties.
+type FlexConfig struct {
+	Direction      string // "row" | "column"
+	Wrap           string // "nowrap" | "wrap" | "wrap-reverse"
+	JustifyContent string // "flex-start" | "flex-end" | "center" | "space-between" | "space-around"
+	AlignItems     string // "stretch" | "flex-start" | "flex-end" | "center"
 }

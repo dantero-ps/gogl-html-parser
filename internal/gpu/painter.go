@@ -14,6 +14,8 @@ type GPUPainter struct {
 	shader       *Shader
 	windowWidth  float64
 	windowHeight float64
+	fbWidth      float64
+	fbHeight     float64
 
 	// A pre-created mesh for performance.
 	// We will update the data dynamically.
@@ -23,6 +25,15 @@ type GPUPainter struct {
 	defaultTexture *Texture
 
 	fontCache map[string]*FontAtlas
+
+	// Scroll state stack for nested scrollable containers
+	scrollStack []scrollState
+}
+
+// scrollState holds the clip rect and offset for a scrollable container.
+type scrollState struct {
+	offsetX, offsetY float64
+	clip             layout.Rect
 }
 
 // NewGPUPainter creates a new painter object.
@@ -51,6 +62,8 @@ func NewGPUPainter(width, height float64, vertexPath, fragmentPath string) (*GPU
 		shader:         shader,
 		windowWidth:    width,
 		windowHeight:   height,
+		fbWidth:        width,
+		fbHeight:       height,
 		rectMesh:       rectMesh,
 		defaultTexture: defaultTexture,
 		fontCache:      make(map[string]*FontAtlas),
@@ -135,8 +148,19 @@ func (p *GPUPainter) SetViewport(width, height float64) {
 	p.updateProjection()
 }
 
+// SetFramebufferSize stores the physical framebuffer dimensions used for scissor test coordinates.
+// Must be called after init and whenever the framebuffer is resized (e.g. window resize on Retina).
+func (p *GPUPainter) SetFramebufferSize(width, height float64) {
+	p.fbWidth = width
+	p.fbHeight = height
+}
+
 // FillRect fills a rectangle.
 func (p *GPUPainter) FillRect(rect layout.Rect, color render.Color) {
+	dx, dy := p.scrollOffset()
+	x := float32(rect.X + dx)
+	y := float32(rect.Y + dy)
+
 	p.shader.Use()
 	p.shader.SetBool("uUseTexture", false)
 
@@ -147,25 +171,22 @@ func (p *GPUPainter) FillRect(rect layout.Rect, color render.Color) {
 	r, g, b, a := normalizeColor(color)
 
 	// Update mesh data and draw
-	p.updateRectMesh(float32(rect.X), float32(rect.Y), float32(rect.Width), float32(rect.Height), r, g, b, a)
+	p.updateRectMesh(x, y, float32(rect.Width), float32(rect.Height), r, g, b, a)
 	p.rectMesh.Draw()
 }
 
 // DrawBorder draws borders.
 func (p *GPUPainter) DrawBorder(rect layout.Rect, borders layout.EdgeSizes, color render.Color) {
-	// Top edge
+	// Use FillRect directly — it applies scrollOffset() internally, so don't add it here.
 	if borders.Top > 0 {
 		p.FillRect(layout.Rect{X: rect.X, Y: rect.Y, Width: rect.Width, Height: borders.Top}, color)
 	}
-	// Alt kenar
 	if borders.Bottom > 0 {
 		p.FillRect(layout.Rect{X: rect.X, Y: rect.Y + rect.Height - borders.Bottom, Width: rect.Width, Height: borders.Bottom}, color)
 	}
-	// Sol kenar
 	if borders.Left > 0 {
 		p.FillRect(layout.Rect{X: rect.X, Y: rect.Y + borders.Top, Width: borders.Left, Height: rect.Height - borders.Top - borders.Bottom}, color)
 	}
-	// Right edge
 	if borders.Right > 0 {
 		p.FillRect(layout.Rect{X: rect.X + rect.Width - borders.Right, Y: rect.Y + borders.Top, Width: borders.Right, Height: rect.Height - borders.Top - borders.Bottom}, color)
 	}
@@ -173,6 +194,9 @@ func (p *GPUPainter) DrawBorder(rect layout.Rect, borders layout.EdgeSizes, colo
 
 // DrawText draws text to the screen. Automatically handles UTF-8 characters.
 func (p *GPUPainter) DrawText(text string, x, y float64, fontSize float64, color render.Color, fontFamily string) {
+	dx, dy := p.scrollOffset()
+	x += dx
+	y += dy
 	// 1. Get Font Atlas from cache or create it
 	cacheKey := fmt.Sprintf("%s-%.1f", fontFamily, fontSize)
 	atlas, ok := p.fontCache[cacheKey]
@@ -265,12 +289,15 @@ func (p *GPUPainter) updateRectMeshWithUV(x, y, w, h, u0, v0, u1, v1, r, g, b, a
 // SetClip sets the clipping area using scissor test.
 func (p *GPUPainter) SetClip(rect layout.Rect) {
 	gl.Enable(gl.SCISSOR_TEST)
-	// OpenGL Scissor accepts bottom-left (0,0), we convert.
+
+	scaleX := p.fbWidth / p.windowWidth
+	scaleY := p.fbHeight / p.windowHeight
+	// OpenGL Scissor accepts bottom-left origin; convert from top-left window coords.
 	gl.Scissor(
-		int32(rect.X),
-		int32(p.windowHeight-(rect.Y+rect.Height)),
-		int32(rect.Width),
-		int32(rect.Height),
+		int32(rect.X*scaleX),
+		int32(p.fbHeight-(rect.Y+rect.Height)*scaleY),
+		int32(rect.Width*scaleX),
+		int32(rect.Height*scaleY),
 	)
 }
 
@@ -283,6 +310,33 @@ func (p *GPUPainter) ClearClip() {
 
 func normalizeColor(c render.Color) (r, g, b, a float32) {
 	return float32(c.R) / 255.0, float32(c.G) / 255.0, float32(c.B) / 255.0, float32(c.A) / 255.0
+}
+
+// scrollOffset returns the accumulated scroll translation from the scroll stack.
+func (p *GPUPainter) scrollOffset() (dx, dy float64) {
+	for _, s := range p.scrollStack {
+		dx -= s.offsetX
+		dy -= s.offsetY
+	}
+	return
+}
+
+// BeginScroll activates scroll clipping and translation for a scrollable container.
+func (p *GPUPainter) BeginScroll(clipRect layout.Rect, offsetX, offsetY float64) {
+	p.scrollStack = append(p.scrollStack, scrollState{offsetX: offsetX, offsetY: offsetY, clip: clipRect})
+	p.SetClip(clipRect)
+}
+
+// EndScroll deactivates scroll clipping for a scrollable container.
+func (p *GPUPainter) EndScroll() {
+	if len(p.scrollStack) > 0 {
+		p.scrollStack = p.scrollStack[:len(p.scrollStack)-1]
+	}
+	if len(p.scrollStack) > 0 {
+		p.SetClip(p.scrollStack[len(p.scrollStack)-1].clip)
+	} else {
+		p.ClearClip()
+	}
 }
 
 func (p *GPUPainter) updateRectMesh(x, y, w, h, r, g, b, a float32) {
