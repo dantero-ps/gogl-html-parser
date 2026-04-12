@@ -277,7 +277,7 @@ Contributions are welcome! This project is in early development, so there's plen
 
 ## Author / Contact
 
-Created for in-game/user interfaces in custom OpenGL applications, especially game engines or Minecraft-like voxel games.
+Created for in-game/user interfaces in custom OpenGL applications.
 
 For questions, issues, or contributions, please open an issue on GitHub.
 
