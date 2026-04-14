@@ -99,3 +99,103 @@ func SetClip(x, y, width, height int32, windowHeight int32) {
 func ClearClip() {
 	gl.Disable(gl.SCISSOR_TEST)
 }
+
+type DynamicMesh struct {
+	VAO         uint32
+	VBO         uint32
+	EBO         uint32
+	capacity    int
+	maxEBOQuads int
+}
+
+const initialDynamicCapacity = 2048
+const initialEBOQuads = 4096
+
+func NewDynamicMesh() *DynamicMesh {
+	var vao, vbo, ebo uint32
+
+	gl.GenVertexArrays(1, &vao)
+	gl.BindVertexArray(vao)
+
+	gl.GenBuffers(1, &vbo)
+	gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
+	gl.BufferData(gl.ARRAY_BUFFER, initialDynamicCapacity*32, nil, gl.DYNAMIC_DRAW)
+
+	indices := makeQuadIndices(initialEBOQuads)
+	gl.GenBuffers(1, &ebo)
+	gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo)
+	gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(indices)*4, gl.Ptr(indices), gl.STATIC_DRAW)
+
+	stride := int32(unsafe.Sizeof(Vertex{}))
+	gl.VertexAttribPointerWithOffset(0, 2, gl.FLOAT, false, stride, 0)
+	gl.EnableVertexAttribArray(0)
+	gl.VertexAttribPointerWithOffset(1, 4, gl.FLOAT, false, stride, 2*4)
+	gl.EnableVertexAttribArray(1)
+	gl.VertexAttribPointerWithOffset(2, 2, gl.FLOAT, false, stride, 6*4)
+	gl.EnableVertexAttribArray(2)
+
+	gl.BindVertexArray(0)
+
+	return &DynamicMesh{
+		VAO:         vao,
+		VBO:         vbo,
+		EBO:         ebo,
+		capacity:    initialDynamicCapacity,
+		maxEBOQuads: initialEBOQuads,
+	}
+}
+
+func makeQuadIndices(n int) []uint32 {
+	idx := make([]uint32, n*6)
+	for i := 0; i < n; i++ {
+		base := uint32(i * 4)
+		idx[i*6+0] = base
+		idx[i*6+1] = base + 1
+		idx[i*6+2] = base + 2
+		idx[i*6+3] = base + 2
+		idx[i*6+4] = base + 3
+		idx[i*6+5] = base
+	}
+	return idx
+}
+
+func (m *DynamicMesh) Upload(verts []Vertex) {
+	if len(verts) == 0 {
+		return
+	}
+	gl.BindVertexArray(m.VAO)
+	gl.BindBuffer(gl.ARRAY_BUFFER, m.VBO)
+	byteSize := len(verts) * 32
+	if len(verts) > m.capacity {
+		gl.BufferData(gl.ARRAY_BUFFER, byteSize, gl.Ptr(verts), gl.DYNAMIC_DRAW)
+		m.capacity = len(verts)
+	} else {
+		gl.BufferSubData(gl.ARRAY_BUFFER, 0, byteSize, gl.Ptr(verts))
+	}
+	gl.BindVertexArray(0)
+}
+
+func (m *DynamicMesh) DrawQuads(quadCount int) {
+	if quadCount == 0 {
+		return
+	}
+	gl.BindVertexArray(m.VAO)
+	if quadCount > m.maxEBOQuads {
+		newMax := m.maxEBOQuads * 2
+		for newMax < quadCount {
+			newMax *= 2
+		}
+		indices := makeQuadIndices(newMax)
+		gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, m.EBO)
+		gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(indices)*4, gl.Ptr(indices), gl.STATIC_DRAW)
+		m.maxEBOQuads = newMax
+	}
+	gl.DrawElements(gl.TRIANGLES, int32(quadCount*6), gl.UNSIGNED_INT, nil)
+	gl.BindVertexArray(0)
+}
+
+func (m *DynamicMesh) Delete() {
+	gl.DeleteVertexArrays(1, &m.VAO)
+	gl.DeleteBuffers(1, &m.VBO)
+	gl.DeleteBuffers(1, &m.EBO)
+}

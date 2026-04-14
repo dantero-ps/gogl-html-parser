@@ -1,8 +1,8 @@
 package style
 
 import (
-	"goglweb/internal/parser/css"
-	"goglweb/internal/parser/html"
+	"github.com/furkandgn/goglweb/internal/parser/css"
+	"github.com/furkandgn/goglweb/internal/parser/html"
 	"testing"
 )
 

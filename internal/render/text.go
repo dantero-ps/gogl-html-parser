@@ -1,8 +1,23 @@
 package render
 
 import (
-	"goglweb/internal/layout"
+	"github.com/furkandgn/goglweb/internal/layout"
 )
+
+// blockContainerWidth walks up the parent chain to find the nearest
+// block or anonymous box and returns its content width. This is used
+// for text-align so the offset is relative to the containing block,
+// not the text node's own measured width.
+func blockContainerWidth(box *layout.LayoutBox) float64 {
+	b := box.Parent
+	for b != nil {
+		if b.BoxType == layout.BlockBox || b.BoxType == layout.AnonymousBox || b.BoxType == layout.FlexBox {
+			return b.Dimensions.Content.Width
+		}
+		b = b.Parent
+	}
+	return box.Dimensions.Content.Width
+}
 
 // RenderText handles the conversion of text-specific styles into DisplayList commands.
 func RenderText(box *layout.LayoutBox, dl *DisplayList) {
@@ -34,19 +49,32 @@ func RenderText(box *layout.LayoutBox, dl *DisplayList) {
 		fontFamily = "Helvetica"
 	}
 
-	// Baseline: if layout measured real ascent, use it; otherwise fall back to fontSize.
-	ascent := box.TextAscent
+	fontWeight := getStyleValue(box, "font-weight")
+	fontStyle := getStyleValue(box, "font-style")
+
+	ascent := box.TextAscent + 3
 	if ascent <= 0 {
 		ascent = fontSize
 	}
 
-	// Add DrawText command using the Content box coordinates
+	textAlign := getStyleValue(box, "text-align")
+	containerWidth := blockContainerWidth(box)
+	// If the layout engine re-wrapped this text node with a reduced width to make
+	// room for inline siblings, use that width so the GPU wraps identically.
+	if box.WrapWidth > 0 {
+		containerWidth = box.WrapWidth
+	}
+
 	dl.Add(DrawTextCmd{
-		Text:       text,
-		X:          box.Dimensions.Content.X,
-		Y:          box.Dimensions.Content.Y + ascent, // Baseline = top + ascent
-		FontSize:   fontSize,
-		Color:      textColor,
-		FontFamily: fontFamily,
+		Text:           text,
+		X:              box.Dimensions.Content.X,
+		Y:              box.Dimensions.Content.Y + ascent,
+		FontSize:       fontSize,
+		Color:          textColor,
+		FontFamily:     fontFamily,
+		TextAlign:      textAlign,
+		ContainerWidth: containerWidth,
+		FontWeight:     fontWeight,
+		FontStyle:      fontStyle,
 	})
 }

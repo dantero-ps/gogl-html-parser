@@ -1,6 +1,7 @@
 package html
 
 import (
+	gohtml "html"
 	"strings"
 	"unicode"
 )
@@ -93,7 +94,7 @@ func (t *Tokenizer) parseText() Token {
 	}
 	content := t.input[t.pos : t.pos+end]
 	t.pos += end
-	return Token{Type: Text, Data: content}
+	return Token{Type: Text, Data: gohtml.UnescapeString(content)}
 }
 
 func parseAttributes(s string) []string {

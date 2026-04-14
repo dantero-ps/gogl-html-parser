@@ -1,7 +1,7 @@
 package style
 
 import (
-	"goglweb/internal/parser/html"
+	"github.com/furkandgn/goglweb/internal/parser/html"
 )
 
 type PropertyMap map[string]string

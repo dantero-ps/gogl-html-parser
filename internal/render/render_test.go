@@ -1,9 +1,9 @@
 package render
 
 import (
-	"goglweb/internal/layout"
-	"goglweb/internal/parser/html"
-	"goglweb/internal/style"
+	"github.com/furkandgn/goglweb/internal/layout"
+	"github.com/furkandgn/goglweb/internal/parser/html"
+	"github.com/furkandgn/goglweb/internal/style"
 	"strings"
 	"testing"
 )

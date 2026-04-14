@@ -1,9 +1,10 @@
 package layout
 
 import (
-	"goglweb/internal/parser/css"
-	"goglweb/internal/parser/html"
-	"goglweb/internal/style"
+	"fmt"
+	"github.com/furkandgn/goglweb/internal/parser/css"
+	"github.com/furkandgn/goglweb/internal/parser/html"
+	"github.com/furkandgn/goglweb/internal/style"
 	"math"
 	"strings"
 	"testing"
@@ -713,7 +714,7 @@ func TestPercentageHeight(t *testing.T) {
 // TestTextMetricsInterface verifies FallbackMeasurer produces expected widths.
 func TestTextMetricsInterface(t *testing.T) {
 	m := &FallbackMeasurer{}
-	metrics := m.MeasureText("Hello", "", 16.0)
+	metrics := m.MeasureText("Hello", "", 16.0, "", "")
 	expected := float64(5) * 16.0 * 0.6
 	if math.Abs(metrics.Width-expected) > 0.01 {
 		t.Errorf("FallbackMeasurer: expected width %.2f, got %.2f", expected, metrics.Width)
@@ -727,7 +728,7 @@ func TestTextMetricsInterface(t *testing.T) {
 func TestMultiLineWrappingHeight(t *testing.T) {
 	m := &FallbackMeasurer{}
 	// Each word is ~4 chars * 16 * 0.6 = 38.4px. With maxWidth=50, "The" fits alone, etc.
-	lines := WordWrap("The quick brown fox", "", 16.0, 50.0, m)
+	lines := WordWrap("The quick brown fox", "", 16.0, 50.0, m, "", "")
 	if len(lines) <= 1 {
 		t.Errorf("Expected multiple lines for narrow container, got %d", len(lines))
 	}
@@ -1148,6 +1149,969 @@ func TestFlexGrowDistribution(t *testing.T) {
 	}
 }
 
+// --- Margin Positioning Tests ---
+
+func TestMarginTopNotDoubled(t *testing.T) {
+	// Single child with margin-top: 20px inside a parent.
+	// The child's Content.Y should be parent_content_Y + marginTop (once), not twice.
+	root := &html.Node{
+		TagName: "div",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{TagName: "p", Type: html.ElementNode},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "div", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "200px"},
+			}},
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "height", Value: "50px"},
+				{Property: "margin-top", Value: "20px"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	parentContentY := layoutTree.Dimensions.Content.Y
+	child := layoutTree.Children[0]
+
+	expectedY := parentContentY + 20
+	if child.Dimensions.Content.Y != expectedY {
+		t.Errorf("Child Content.Y should be %f (parent content Y + marginTop once), got %f",
+			expectedY, child.Dimensions.Content.Y)
+	}
+}
+
+func TestSiblingMarginCollapse(t *testing.T) {
+	// Two siblings: first has margin-bottom: 30px, second has margin-top: 20px.
+	// Collapsed margin = max(30, 20) = 30px.
+	// Gap between content bottom of first and content top of second should be 30px.
+	root := &html.Node{
+		TagName: "div",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{TagName: "p", Type: html.ElementNode},
+			{TagName: "p", Type: html.ElementNode},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "div", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "200px"},
+			}},
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "height", Value: "50px"},
+				{Property: "margin-bottom", Value: "30px"},
+				{Property: "margin-top", Value: "20px"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	child0 := layoutTree.Children[0]
+	child1 := layoutTree.Children[1]
+
+	child0Bottom := child0.Dimensions.Content.Y + child0.Dimensions.Content.Height
+	gap := child1.Dimensions.Content.Y - child0Bottom
+
+	// Gap should be collapsed margin (30px), not 30+20=50px
+	// and not 30+20+20=70px (doubled marginTop)
+	expectedCollapsedMargin := 30.0
+	if math.Abs(gap-expectedCollapsedMargin) > 0.01 {
+		t.Errorf("Gap between siblings should be %f (collapsed margin), got %f. "+
+			"child0 bottom=%f, child1 top=%f",
+			expectedCollapsedMargin, gap, child0Bottom, child1.Dimensions.Content.Y)
+	}
+}
+
+func TestSiblingMarginCollapseWithPadding(t *testing.T) {
+	// Two siblings with margin + padding + border
+	// First: margin-bottom=10, padding-bottom=5, border-bottom=2
+	// Second: margin-top=20, padding-top=5, border-top=2
+	// Collapsed margin = max(10, 20) = 20
+	root := &html.Node{
+		TagName: "div",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{TagName: "p", Type: html.ElementNode},
+			{TagName: "p", Type: html.ElementNode},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "div", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "200px"},
+			}},
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "height", Value: "50px"},
+				{Property: "margin-bottom", Value: "10px"},
+				{Property: "margin-top", Value: "20px"},
+				{Property: "padding", Value: "5px"},
+				{Property: "border", Value: "2px solid black"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	child0 := layoutTree.Children[0]
+	child1 := layoutTree.Children[1]
+
+	// Bottom of child0's border box
+	child0BorderBottom := child0.Dimensions.Content.Y + child0.Dimensions.Content.Height + child0.Dimensions.Padding.Bottom + child0.Dimensions.Border.Bottom
+	// Top of child1's border box
+	child1BorderTop := child1.Dimensions.Content.Y - child1.Dimensions.Padding.Top - child1.Dimensions.Border.Top
+
+	marginGap := child1BorderTop - child0BorderBottom
+
+	// Gap between border boxes should be collapsed margin = max(10, 20) = 20
+	expectedCollapsedMargin := 20.0
+	if math.Abs(marginGap-expectedCollapsedMargin) > 0.01 {
+		t.Errorf("Margin gap between border boxes should be %f, got %f. "+
+			"child0 borderBottom=%f, child1 borderTop=%f",
+			expectedCollapsedMargin, marginGap, child0BorderBottom, child1BorderTop)
+	}
+}
+
+func TestNoMarginCollapseFirstChild(t *testing.T) {
+	// First child with margin-top: 40px should be positioned 40px below parent content top.
+	// No collapsing happens for the first child (no previous sibling).
+	root := &html.Node{
+		TagName: "div",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{TagName: "p", Type: html.ElementNode},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "div", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "200px"},
+				{Property: "padding-top", Value: "10px"},
+			}},
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "height", Value: "50px"},
+				{Property: "margin-top", Value: "40px"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	parentContentY := layoutTree.Dimensions.Content.Y
+	child := layoutTree.Children[0]
+
+	// Parent content Y + child's marginTop (once) = child's content Y
+	expectedY := parentContentY + 40.0
+	if child.Dimensions.Content.Y != expectedY {
+		t.Errorf("Child Content.Y should be %f (parent content Y + marginTop once), got %f",
+			expectedY, child.Dimensions.Content.Y)
+	}
+}
+
+// --- Inline Span Layout Tests ---
+
+// mockMeasurer simulates a real font measurer where "Hello World" fills ~80% of a 200px line.
+// This tests behavior that FallbackMeasurer cannot reproduce.
+type mockMeasurer struct {
+	charWidth float64
+	fontSize  float64
+	lineH     float64
+}
+
+func (m *mockMeasurer) MeasureText(text string, fontFamily string, fontSize float64, fontWeight string, fontStyle string) TextMetrics {
+	return TextMetrics{
+		Width:      float64(len(text)) * m.charWidth * (fontSize / m.fontSize),
+		Height:     m.lineH * (fontSize / m.fontSize),
+		Ascent:     m.lineH * 0.8 * (fontSize / m.fontSize),
+		LineHeight: m.lineH * 1.2 * (fontSize / m.fontSize),
+	}
+}
+func (m *mockMeasurer) MeasureWord(word string, fontFamily string, fontSize float64, fontWeight string, fontStyle string) float64 {
+	return m.MeasureText(word, fontFamily, fontSize, fontWeight, fontStyle).Width
+}
+
+func TestInlineSpanWidthMatchesTextContent(t *testing.T) {
+	// <p><span>Hello</span></p>
+	// The span's width should be proportional to "Hello" text length, NOT the container width.
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "Hello"}},
+			},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "800px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "inline"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	// Layout tree: p(BlockBox) > anonymous(AnonymousBox) > span(InlineBox)
+	if len(layoutTree.Children) != 1 {
+		t.Fatalf("Expected 1 child (anonymous box), got %d", len(layoutTree.Children))
+	}
+	anonBox := layoutTree.Children[0]
+	if anonBox.BoxType != AnonymousBox {
+		t.Fatalf("Expected AnonymousBox, got %v", anonBox.BoxType)
+	}
+	if len(anonBox.Children) != 1 {
+		t.Fatalf("Expected 1 child in anonymous box, got %d", len(anonBox.Children))
+	}
+	spanBox := anonBox.Children[0]
+
+	// With FallbackMeasurer: "Hello" = 5 chars * 16 * 0.6 = 48px
+	// The span width should be ~48px, NOT close to 800px (container width)
+	expectedWidth := 5.0 * 16.0 * 0.6
+	if spanBox.Dimensions.Content.Width > expectedWidth*1.5 {
+		t.Errorf("Span width should be ~%.1f (text measured width), got %.1f — "+
+			"inline box is taking container width instead of text content width",
+			expectedWidth, spanBox.Dimensions.Content.Width)
+	}
+	if spanBox.Dimensions.Content.Width == 0 {
+		t.Errorf("Span width should not be 0")
+	}
+}
+
+func TestTwoInlineSpansSideBySide(t *testing.T) {
+	// <p><span>Hello</span><span>World</span></p>
+	// Both spans should sit side by side, NOT on separate lines.
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "Hello"}},
+			},
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "World"}},
+			},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "800px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "inline"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	anonBox := layoutTree.Children[0]
+	if len(anonBox.Children) != 2 {
+		t.Fatalf("Expected 2 spans in anonymous box, got %d", len(anonBox.Children))
+	}
+
+	span1 := anonBox.Children[0]
+	span2 := anonBox.Children[1]
+
+	// Both spans should be on the SAME line (same Y)
+	if span1.Dimensions.Content.Y != span2.Dimensions.Content.Y {
+		t.Errorf("Spans should be on the same line. span1.Y=%.1f, span2.Y=%.1f",
+			span1.Dimensions.Content.Y, span2.Dimensions.Content.Y)
+	}
+
+	// span2 should be to the RIGHT of span1
+	if span2.Dimensions.Content.X <= span1.Dimensions.Content.X {
+		t.Errorf("span2 should be to the right of span1. span1.X=%.1f, span2.X=%.1f",
+			span1.Dimensions.Content.X, span2.Dimensions.Content.X)
+	}
+
+	// span2.X should equal span1.X + span1.Width (they should be adjacent)
+	expectedGap := span1.Dimensions.Content.X + span1.Dimensions.Content.Width
+	gap := math.Abs(span2.Dimensions.Content.X - expectedGap)
+	if gap > 1.0 {
+		t.Errorf("span2.X (%.1f) should be adjacent to span1.X + span1.Width (%.1f), gap=%.1f",
+			span2.Dimensions.Content.X, expectedGap, gap)
+	}
+}
+
+func TestInlineSpanDoesNotOverflowToNewLine(t *testing.T) {
+	// <p><span>Short</span><span>Text</span></p>
+	// With a wide container, both spans should fit on one line.
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "Short"}},
+			},
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "Text"}},
+			},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "800px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "inline"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	anonBox := layoutTree.Children[0]
+	span1 := anonBox.Children[0]
+	span2 := anonBox.Children[1]
+
+	// Total width of both spans should NOT exceed container width (800)
+	// FallbackMeasurer: "Short" = 5*16*0.6=48, "Text" = 4*16*0.6=38.4 → total ~86.4
+	totalWidth := span2.Dimensions.Content.X + span2.Dimensions.Content.Width - span1.Dimensions.Content.X
+	if totalWidth > 800 {
+		t.Errorf("Both spans should fit on one line. Total width=%.1f, container=800", totalWidth)
+	}
+
+	// Anonymous box height should be one line, not two
+	// FallbackMeasurer: single line height = fontSize * 1.2 = 19.2
+	if anonBox.Dimensions.Content.Height > 16.0*1.2*2.0 {
+		t.Errorf("Anonymous box height should be ~1 line (%.1f), got %.1f — "+
+			"spans may be wrapping to multiple lines",
+			16.0*1.2, anonBox.Dimensions.Content.Height)
+	}
+}
+
+func TestInlineSpanBetweenTextNodes(t *testing.T) {
+	// <p>Hello <span>inline</span> world</p>
+	// "Hello " (text) + span("inline") + " world" (text) should all flow inline.
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{Type: html.TextNode, Content: "Hello "},
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "inline"}},
+			},
+			{Type: html.TextNode, Content: " world"},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "800px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "inline"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	anonBox := layoutTree.Children[0]
+
+	// All children of the anonymous box should be on the same Y
+	for i, child := range anonBox.Children {
+		if i > 0 && child.Dimensions.Content.Y != anonBox.Children[0].Dimensions.Content.Y {
+			t.Errorf("Child %d Y (%.1f) differs from child 0 Y (%.1f) — "+
+				"inline elements not on the same line", i, child.Dimensions.Content.Y,
+				anonBox.Children[0].Dimensions.Content.Y)
+		}
+	}
+
+	// Check X ordering: each child should start after the previous one ends
+	for i := 1; i < len(anonBox.Children); i++ {
+		prev := anonBox.Children[i-1]
+		curr := anonBox.Children[i]
+		if curr.Dimensions.Content.X < prev.Dimensions.Content.X+prev.Dimensions.Content.Width {
+			t.Errorf("Child %d X (%.1f) overlaps with child %d end (%.1f) — "+
+				"inline elements not flowing left-to-right",
+				i, curr.Dimensions.Content.X, i-1, prev.Dimensions.Content.X+prev.Dimensions.Content.Width)
+		}
+	}
+}
+
+func TestInlineSpanWidthNarrowNotContainer(t *testing.T) {
+	// Regression: an inline span with short text should NOT have width ≈ container width.
+	// This is the core bug: layoutInline gives spans the container width via WordWrap.
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{Type: html.TextNode, Content: "Before "},
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "X"}},
+			},
+			{Type: html.TextNode, Content: " After"},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "800px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "inline"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	anonBox := layoutTree.Children[0]
+	// Find the span box
+	var spanBox *LayoutBox
+	for _, child := range anonBox.Children {
+		if child.BoxType == InlineBox && child.StyledNode != nil && child.StyledNode.Node.Type == html.ElementNode {
+			spanBox = child
+			break
+		}
+	}
+	if spanBox == nil {
+		t.Fatal("Could not find span InlineBox in anonymous box")
+	}
+
+	// "X" is 1 char: 1 * 16 * 0.6 = 9.6px
+	// Span width should be ~9.6px, NOT 800px
+	measuredWidth := 1.0 * 16.0 * 0.6
+	if spanBox.Dimensions.Content.Width > measuredWidth*2.0 {
+		t.Errorf("Span with single char 'X' should have width ~%.1f, got %.1f — "+
+			"inline box width is inflated (likely taking container width from WordWrap)",
+			measuredWidth, spanBox.Dimensions.Content.Width)
+	}
+}
+
+// --- parseShorthand Tests ---
+
+// TestInlineSpanWidthWithRealisticMeasurer uses a mock measurer with wider characters
+// (like a real font) to detect if layoutInline inflates inline box width.
+// With FallbackMeasurer the bug doesn't show because char widths are too narrow.
+func TestInlineSpanWidthWithRealisticMeasurer(t *testing.T) {
+	// <p><span>inline spans</span></p>
+	// With a measurer that gives ~10px per char, "inline spans" = 12 chars * 10 = 120px.
+	// If layoutInline gives it container width (~800px), that's a bug.
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "inline spans"}},
+			},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "800px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "inline"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	// Mock measurer: 10px per character at fontSize 16
+	measurer := &mockMeasurer{charWidth: 10.0, fontSize: 16.0, lineH: 16.0}
+	ctx := NewLayoutContext(800, 600)
+	ctx.TextMeasurer = measurer
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	anonBox := layoutTree.Children[0]
+	spanBox := anonBox.Children[0]
+
+	// "inline spans" = 12 chars, with spaces = 12 (splitWords splits to ["inline", "spans"])
+	// WordWrap produces one line: "inline spans" = 12 chars * 10px = 120px
+	expectedTextWidth := 12.0 * 10.0
+	if spanBox.Dimensions.Content.Width > expectedTextWidth*1.5 {
+		t.Errorf("Span width should be ~%.1f (text measured width), got %.1f — "+
+			"inline box is taking container width instead of text content width",
+			expectedTextWidth, spanBox.Dimensions.Content.Width)
+	}
+	if spanBox.Dimensions.Content.Width == 0 {
+		t.Fatal("Span width should not be 0")
+	}
+}
+
+func TestTwoSpansAdjacentWithRealisticMeasurer(t *testing.T) {
+	// <p><span>AAA</span><span>BBB</span></p>
+	// With 10px/char: "AAA"=30px, "BBB"=30px. Total = 60px.
+	// If span1 takes container width, span2 is pushed to a new line or far right.
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "AAA"}},
+			},
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "BBB"}},
+			},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "800px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "inline"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	measurer := &mockMeasurer{charWidth: 10.0, fontSize: 16.0, lineH: 16.0}
+	ctx := NewLayoutContext(800, 600)
+	ctx.TextMeasurer = measurer
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	anonBox := layoutTree.Children[0]
+	span1 := anonBox.Children[0]
+	span2 := anonBox.Children[1]
+
+	// Both should be on the same line
+	if span1.Dimensions.Content.Y != span2.Dimensions.Content.Y {
+		t.Errorf("Spans should be on same line. span1.Y=%.1f, span2.Y=%.1f",
+			span1.Dimensions.Content.Y, span2.Dimensions.Content.Y)
+	}
+
+	// span1 width should be ~30px (3 chars * 10px), NOT ~800px
+	span1ExpectedWidth := 3.0 * 10.0
+	if span1.Dimensions.Content.Width > span1ExpectedWidth*1.5 {
+		t.Errorf("span1 width should be ~%.1f, got %.1f — inline box inflated to container width",
+			span1ExpectedWidth, span1.Dimensions.Content.Width)
+	}
+
+	// span2 should start right after span1
+	expectedSpan2X := span1.Dimensions.Content.X + span1.Dimensions.Content.Width
+	if math.Abs(span2.Dimensions.Content.X-expectedSpan2X) > 1.0 {
+		t.Errorf("span2.X (%.1f) should be adjacent to span1 end (%.1f)",
+			span2.Dimensions.Content.X, expectedSpan2X)
+	}
+}
+
+func TestLongInlineTextWrapsAndDoesNotInflate(t *testing.T) {
+	// <p><span>This is a longer piece of text that should wrap</span></p>
+	// Container = 200px, charWidth=10px → ~20 chars per line.
+	// The span should wrap but its width should be ~200px (container), not more.
+	// And crucially, the text AFTER the span should start at the correct position.
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "This is a longer piece of text that should wrap"}},
+			},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "200px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "inline"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	measurer := &mockMeasurer{charWidth: 10.0, fontSize: 16.0, lineH: 16.0}
+	ctx := NewLayoutContext(200, 600)
+	ctx.TextMeasurer = measurer
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 200, Height: 600},
+	}
+
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	anonBox := layoutTree.Children[0]
+	spanBox := anonBox.Children[0]
+
+	// Span should not exceed container width
+	if spanBox.Dimensions.Content.Width > 200+1 {
+		t.Errorf("Span width (%.1f) should not exceed container width (200)", spanBox.Dimensions.Content.Width)
+	}
+
+	// Span should be multi-line: "This is a longer piece of text that should wrap"
+	// = 50 chars, at 10px/char and 200px/line → at least 2 lines
+	// Height should be > single line height (16*1.2=19.2)
+	singleLineHeight := 16.0 * 1.2
+	if spanBox.Dimensions.Content.Height <= singleLineHeight {
+		t.Errorf("Span height (%.1f) should be > single line height (%.1f) for wrapped text",
+			spanBox.Dimensions.Content.Height, singleLineHeight)
+	}
+}
+
+func TestInlineSpanBetweenTextWithRealisticMeasurer(t *testing.T) {
+	// <p>Before <span>MID</span> After</p>
+	// With 10px/char: "Before "=70px, "MID"=30px, " After"=60px. Total ~160px in 800px container.
+	// All should be on same line, flowing left-to-right.
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{Type: html.TextNode, Content: "Before "},
+			{
+				TagName:  "span",
+				Type:     html.ElementNode,
+				Children: []*html.Node{{Type: html.TextNode, Content: "MID"}},
+			},
+			{Type: html.TextNode, Content: " After"},
+		},
+	}
+
+	stylesheet := &css.Stylesheet{
+		Rules: []css.Rule{
+			{Selector: "p", Declarations: []css.Declaration{
+				{Property: "display", Value: "block"},
+				{Property: "width", Value: "800px"},
+			}},
+			{Selector: "span", Declarations: []css.Declaration{
+				{Property: "display", Value: "inline"},
+			}},
+		},
+	}
+
+	styledTree := style.BuildStyledTree(root, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	measurer := &mockMeasurer{charWidth: 10.0, fontSize: 16.0, lineH: 16.0}
+	ctx := NewLayoutContext(800, 600)
+	ctx.TextMeasurer = measurer
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	anonBox := layoutTree.Children[0]
+	if len(anonBox.Children) != 3 {
+		t.Fatalf("Expected 3 children in anonymous box, got %d", len(anonBox.Children))
+	}
+
+	textBefore := anonBox.Children[0]
+	spanBox := anonBox.Children[1]
+	textAfter := anonBox.Children[2]
+
+	// All on same line
+	firstY := textBefore.Dimensions.Content.Y
+	for i, child := range anonBox.Children {
+		if child.Dimensions.Content.Y != firstY {
+			t.Errorf("Child %d Y (%.1f) differs from first child Y (%.1f)", i, child.Dimensions.Content.Y, firstY)
+		}
+	}
+
+	// Span width should be ~30px (3 chars * 10px)
+	spanExpectedWidth := 3.0 * 10.0
+	if spanBox.Dimensions.Content.Width > spanExpectedWidth*1.5 {
+		t.Errorf("Span width should be ~%.1f, got %.1f", spanExpectedWidth, spanBox.Dimensions.Content.Width)
+	}
+
+	// Span should start after "Before " (~70px)
+	textBeforeEnd := textBefore.Dimensions.Content.X + textBefore.Dimensions.Content.Width
+	if math.Abs(spanBox.Dimensions.Content.X-textBeforeEnd) > 1.0 {
+		t.Errorf("Span X (%.1f) should be adjacent to textBefore end (%.1f)",
+			spanBox.Dimensions.Content.X, textBeforeEnd)
+	}
+
+	// textAfter should start after span
+	spanEnd := spanBox.Dimensions.Content.X + spanBox.Dimensions.Content.Width
+	if math.Abs(textAfter.Dimensions.Content.X-spanEnd) > 1.0 {
+		t.Errorf("textAfter X (%.1f) should be adjacent to span end (%.1f)",
+			textAfter.Dimensions.Content.X, spanEnd)
+	}
+}
+
+// --- parseShorthand Tests ---
+
+func TestParseShorthandEmpty(t *testing.T) {
+	result := parseShorthand("", 0)
+	if result != "" {
+		t.Errorf("parseShorthand('', 0) = %q, want empty", result)
+	}
+}
+
+func TestParseShorthandSingleValue(t *testing.T) {
+	for _, idx := range []int{0, 1, 2, 3} {
+		result := parseShorthand("10px", idx)
+		if result != "10px" {
+			t.Errorf("parseShorthand('10px', %d) = %q, want '10px'", idx, result)
+		}
+	}
+}
+
+func TestParseShorthandTwoValues(t *testing.T) {
+	// CSS: [top/bottom] [left/right] → "20px 40px"
+	// index 0=left → 40px, 1=right → 40px, 2=top → 20px, 3=bottom → 20px
+	cases := []struct {
+		index    int
+		expected string
+	}{
+		{0, "40px"},
+		{1, "40px"},
+		{2, "20px"},
+		{3, "20px"},
+	}
+	for _, tc := range cases {
+		result := parseShorthand("20px 40px", tc.index)
+		if result != tc.expected {
+			t.Errorf("parseShorthand('20px 40px', %d) = %q, want %q", tc.index, result, tc.expected)
+		}
+	}
+}
+
+func TestParseShorthandThreeValues(t *testing.T) {
+	// CSS: [top] [left/right] [bottom] → "10px 20px 30px"
+	// index 0=left → 20px, 1=right → 20px, 2=top → 10px, 3=bottom → 30px
+	cases := []struct {
+		index    int
+		expected string
+	}{
+		{0, "20px"},
+		{1, "20px"},
+		{2, "10px"},
+		{3, "30px"},
+	}
+	for _, tc := range cases {
+		result := parseShorthand("10px 20px 30px", tc.index)
+		if result != tc.expected {
+			t.Errorf("parseShorthand('10px 20px 30px', %d) = %q, want %q", tc.index, result, tc.expected)
+		}
+	}
+}
+
+func TestParseShorthandFourValues(t *testing.T) {
+	// CSS: [top] [right] [bottom] [left] → "1px 2px 3px 4px"
+	// index 0=left → 4px, 1=right → 2px, 2=top → 1px, 3=bottom → 3px
+	cases := []struct {
+		index    int
+		expected string
+	}{
+		{0, "4px"},
+		{1, "2px"},
+		{2, "1px"},
+		{3, "3px"},
+	}
+	for _, tc := range cases {
+		result := parseShorthand("1px 2px 3px 4px", tc.index)
+		if result != tc.expected {
+			t.Errorf("parseShorthand('1px 2px 3px 4px', %d) = %q, want %q", tc.index, result, tc.expected)
+		}
+	}
+}
+
+func TestParseShorthandFourValuesMargin(t *testing.T) {
+	// Real example: margin: 20px 0 10px 0
+	// CSS: top=20px right=0 bottom=10px left=0
+	// index 0=left → 0, 1=right → 0, 2=top → 20px, 3=bottom → 10px
+	cases := []struct {
+		index    int
+		expected string
+	}{
+		{0, "0"},
+		{1, "0"},
+		{2, "20px"},
+		{3, "10px"},
+	}
+	for _, tc := range cases {
+		result := parseShorthand("20px 0 10px 0", tc.index)
+		if result != tc.expected {
+			t.Errorf("parseShorthand('20px 0 10px 0', %d) = %q, want %q", tc.index, result, tc.expected)
+		}
+	}
+}
+
+func TestParseShorthandFourValuesAllSame(t *testing.T) {
+	// margin: 10px 10px 10px 10px → every side should be 10px
+	for _, idx := range []int{0, 1, 2, 3} {
+		result := parseShorthand("10px 10px 10px 10px", idx)
+		if result != "10px" {
+			t.Errorf("parseShorthand('10px 10px 10px 10px', %d) = %q, want '10px'", idx, result)
+		}
+	}
+}
+
+func TestParseShorthandMixedUnits(t *testing.T) {
+	// padding: 1em 2em 3em 4em — should still split and return correctly
+	cases := []struct {
+		index    int
+		expected string
+	}{
+		{0, "4em"},
+		{1, "2em"},
+		{2, "1em"},
+		{3, "3em"},
+	}
+	for _, tc := range cases {
+		result := parseShorthand("1em 2em 3em 4em", tc.index)
+		if result != tc.expected {
+			t.Errorf("parseShorthand('1em 2em 3em 4em', %d) = %q, want %q", tc.index, result, tc.expected)
+		}
+	}
+}
+
+func TestParseShorthandTwoValuesZero(t *testing.T) {
+	// margin: 0 auto → top/bottom=0, left/right=auto
+	cases := []struct {
+		index    int
+		expected string
+	}{
+		{0, "auto"},
+		{1, "auto"},
+		{2, "0"},
+		{3, "0"},
+	}
+	for _, tc := range cases {
+		result := parseShorthand("0 auto", tc.index)
+		if result != tc.expected {
+			t.Errorf("parseShorthand('0 auto', %d) = %q, want %q", tc.index, result, tc.expected)
+		}
+	}
+}
+
 // --- Plan 02-03: Overflow and Scroll Tests ---
 
 // TestClampScrollOffset verifies the scroll offset clamping helper.
@@ -1198,5 +2162,264 @@ func TestIsScrollable(t *testing.T) {
 	box.Overflow = "auto"
 	if !box.IsScrollable() {
 		t.Error("overflow:auto should be scrollable")
+	}
+}
+
+// --- Debug: Real HTML inline spans layout ---
+
+func printTree(box *LayoutBox, depth int) {
+	indent := ""
+	for i := 0; i < depth; i++ {
+		indent += "  "
+	}
+	boxType := ""
+	switch box.BoxType {
+	case BlockBox:
+		boxType = "Block"
+	case InlineBox:
+		boxType = "Inline"
+	case AnonymousBox:
+		boxType = "Anonymous"
+	}
+	tag := ""
+	content := ""
+	if box.StyledNode != nil {
+		tag = box.StyledNode.Node.TagName
+		if box.StyledNode.Node.Content != "" {
+			content = fmt.Sprintf(" content=%q", box.StyledNode.Node.Content)
+		}
+	}
+	fmt.Printf("%s[%s] tag=%s X=%.1f Y=%.1f W=%.1f H=%.1f%s\n",
+		indent, boxType, tag,
+		box.Dimensions.Content.X, box.Dimensions.Content.Y,
+		box.Dimensions.Content.Width, box.Dimensions.Content.Height,
+		content)
+	for _, child := range box.Children {
+		printTree(child, depth+1)
+	}
+}
+
+func TestDebugInlineSpansLayout(t *testing.T) {
+	htmlStr := `<p class="lead">This paragraph uses a larger font size and bold weight to demonstrate <span class="highlight">inline spans</span> inside block elements.</p>`
+
+	cssStr := `
+* { margin: 0; padding: 0; }
+p.lead {
+  display: block;
+  font-size: 16px;
+  font-weight: bold;
+  color: #222222;
+  padding: 10px;
+  background-color: #f0f4ff;
+  border: 1px solid #b0c4f0;
+}
+.highlight {
+  color: #c0392b;
+  font-style: italic;
+}
+`
+
+	doc := html.NewParser(htmlStr).Parse()
+
+	stylesheet := css.NewParser(cssStr).Parse()
+	styledTree := style.BuildStyledTree(doc, stylesheet)
+	layoutTree := BuildLayoutTree(styledTree)
+
+	containingBlock := Dimensions{
+		Content: Rect{X: 0, Y: 0, Width: 800, Height: 600},
+	}
+
+	layoutTree.Layout(containingBlock)
+
+	t.Log("=== Layout Tree ===")
+	printTree(layoutTree, 0)
+
+	// Verify structure
+	if len(layoutTree.Children) != 1 {
+		t.Fatalf("Expected 1 child (anonymous box), got %d", len(layoutTree.Children))
+	}
+	anonBox := layoutTree.Children[0]
+	if anonBox.BoxType != AnonymousBox {
+		t.Fatalf("Expected AnonymousBox, got %v", anonBox.BoxType)
+	}
+
+	// There should be 3 inline children: text("This...demonstrate "), span("inline spans"), text(" inside...")
+	t.Logf("Anonymous box has %d children", len(anonBox.Children))
+	for i, child := range anonBox.Children {
+		tag := ""
+		cont := ""
+		if child.StyledNode != nil {
+			tag = child.StyledNode.Node.TagName
+			cont = child.StyledNode.Node.Content
+		}
+		bt := "Inline"
+		if child.BoxType == AnonymousBox {
+			bt = "Anonymous"
+		}
+		t.Logf("  child[%d]: %s tag=%s X=%.1f Y=%.1f W=%.1f H=%.1f content=%q",
+			i, bt, tag,
+			child.Dimensions.Content.X, child.Dimensions.Content.Y,
+			child.Dimensions.Content.Width, child.Dimensions.Content.Height,
+			cont)
+	}
+
+	// First two children (text + span "inline spans") should be on the same line.
+	// The third text node (" inside block elements.") may wrap to a new line depending
+	// on container width, which is correct behavior.
+	if len(anonBox.Children) >= 2 {
+		if anonBox.Children[1].Dimensions.Content.Y != anonBox.Children[0].Dimensions.Content.Y {
+			t.Errorf("span Y (%.1f) should be on same line as first text Y (%.1f)",
+				anonBox.Children[1].Dimensions.Content.Y, anonBox.Children[0].Dimensions.Content.Y)
+		}
+	}
+
+	// Span should NOT have container width
+	for _, child := range anonBox.Children {
+		if child.StyledNode != nil && child.StyledNode.Node.TagName == "span" {
+			if child.Dimensions.Content.Width > 800*0.5 {
+				t.Errorf("Span width (%.1f) is suspiciously large — may be taking container width",
+					child.Dimensions.Content.Width)
+			}
+		}
+	}
+}
+
+// TestMultiLineInlineSpanFlow verifies that when a text node wraps to multiple lines,
+// the next sibling (span) continues on the LAST line of the previous text rather than
+// starting on a new line below it.
+func TestMultiLineInlineSpanFlow(t *testing.T) {
+	// Build: <p>AAA BBB CCC DDD <span>EEE</span> FFF</p>
+	// charWidth=10, container=120px → "AAA BBB CCC DDD " wraps to:
+	//   Line 1: "AAA BBB CCC"  (110px)
+	//   Line 2: "DDD"          (30px)
+	// LastLineWidth=30, NumLines=2
+	// Span "EEE" (30px) should start at X=30 on line 2 (Y = firstText.Y + lineHeight)
+	// " FFF" should follow span on the same line.
+
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{Type: html.TextNode, Content: "AAA BBB CCC DDD "},
+			{
+				TagName: "span",
+				Type:    html.ElementNode,
+				Children: []*html.Node{
+					{Type: html.TextNode, Content: "EEE"},
+				},
+			},
+			{Type: html.TextNode, Content: " FFF"},
+		},
+	}
+
+	styledRoot := &style.StyledNode{
+		Node:            root,
+		SpecifiedValues: style.PropertyMap{"display": "block"},
+		Children: []*style.StyledNode{
+			{
+				Node:            root.Children[0],
+				SpecifiedValues: style.PropertyMap{},
+			},
+			{
+				Node:            root.Children[1],
+				SpecifiedValues: style.PropertyMap{},
+				Children: []*style.StyledNode{
+					{
+						Node:            root.Children[1].Children[0],
+						SpecifiedValues: style.PropertyMap{},
+					},
+				},
+			},
+			{
+				Node:            root.Children[2],
+				SpecifiedValues: style.PropertyMap{},
+			},
+		},
+	}
+
+	layoutTree := BuildLayoutTree(styledRoot)
+	measurer := &mockMeasurer{charWidth: 10.0, fontSize: 16.0, lineH: 16.0}
+	ctx := NewLayoutContext(120, 600)
+	ctx.TextMeasurer = measurer
+	containingBlock := Dimensions{Content: Rect{X: 0, Y: 0, Width: 120, Height: 600}}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	// Log the full tree for debugging.
+	t.Logf("root box: X=%.1f Y=%.1f W=%.1f H=%.1f",
+		layoutTree.Dimensions.Content.X,
+		layoutTree.Dimensions.Content.Y,
+		layoutTree.Dimensions.Content.Width,
+		layoutTree.Dimensions.Content.Height)
+
+	if len(layoutTree.Children) == 0 {
+		t.Fatal("expected at least one child (anonymous box) under <p>")
+	}
+
+	anonBox := layoutTree.Children[0]
+	t.Logf("anonBox: X=%.1f Y=%.1f W=%.1f H=%.1f children=%d",
+		anonBox.Dimensions.Content.X,
+		anonBox.Dimensions.Content.Y,
+		anonBox.Dimensions.Content.Width,
+		anonBox.Dimensions.Content.Height,
+		len(anonBox.Children))
+
+	if len(anonBox.Children) < 3 {
+		t.Fatalf("expected 3 inline children in anonymous box, got %d", len(anonBox.Children))
+	}
+
+	firstText := anonBox.Children[0]
+	spanBox := anonBox.Children[1]
+	lastText := anonBox.Children[2]
+
+	t.Logf("firstText: X=%.1f Y=%.1f W=%.1f H=%.1f NumLines=%d LastLineWidth=%.1f",
+		firstText.Dimensions.Content.X,
+		firstText.Dimensions.Content.Y,
+		firstText.Dimensions.Content.Width,
+		firstText.Dimensions.Content.Height,
+		firstText.NumLines,
+		firstText.LastLineWidth)
+	t.Logf("span:      X=%.1f Y=%.1f W=%.1f H=%.1f",
+		spanBox.Dimensions.Content.X,
+		spanBox.Dimensions.Content.Y,
+		spanBox.Dimensions.Content.Width,
+		spanBox.Dimensions.Content.Height)
+	t.Logf("lastText:  X=%.1f Y=%.1f W=%.1f H=%.1f",
+		lastText.Dimensions.Content.X,
+		lastText.Dimensions.Content.Y,
+		lastText.Dimensions.Content.Width,
+		lastText.Dimensions.Content.Height)
+
+	// First text must wrap to exactly 2 lines.
+	if firstText.NumLines != 2 {
+		t.Errorf("firstText.NumLines = %d, want 2", firstText.NumLines)
+	}
+
+	// LastLineWidth of "DDD" = 3 chars * 10 = 30px.
+	if math.Abs(firstText.LastLineWidth-30.0) > 0.1 {
+		t.Errorf("firstText.LastLineWidth = %.2f, want 30.0", firstText.LastLineWidth)
+	}
+
+	// lineHeight = lineH * 1.2 = 16 * 1.2 = 19.2
+	lineHeight := 16.0 * 1.2
+	expectedSpanY := firstText.Dimensions.Content.Y + lineHeight
+	if math.Abs(spanBox.Dimensions.Content.Y-expectedSpanY) > 0.1 {
+		t.Errorf("span Y = %.2f, want %.2f (firstText.Y + lineHeight)", spanBox.Dimensions.Content.Y, expectedSpanY)
+	}
+
+	// Span X must continue after the last line of firstText (X = container left + LastLineWidth).
+	expectedSpanX := containingBlock.Content.X + firstText.LastLineWidth
+	if math.Abs(spanBox.Dimensions.Content.X-expectedSpanX) > 0.1 {
+		t.Errorf("span X = %.2f, want %.2f (container.X + lastLineWidth)", spanBox.Dimensions.Content.X, expectedSpanX)
+	}
+
+	// " FFF" must be on the same line as the span.
+	if math.Abs(lastText.Dimensions.Content.Y-spanBox.Dimensions.Content.Y) > 0.1 {
+		t.Errorf("lastText Y = %.2f, want %.2f (same line as span)", lastText.Dimensions.Content.Y, spanBox.Dimensions.Content.Y)
+	}
+
+	// " FFF" must start immediately after the span.
+	expectedLastTextX := spanBox.Dimensions.Content.X + spanBox.Dimensions.Content.Width
+	if math.Abs(lastText.Dimensions.Content.X-expectedLastTextX) > 0.1 {
+		t.Errorf("lastText X = %.2f, want %.2f (span.X + span.Width)", lastText.Dimensions.Content.X, expectedLastTextX)
 	}
 }

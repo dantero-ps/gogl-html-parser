@@ -12,15 +12,15 @@ type TextMetrics struct {
 
 // TextMeasurer is the interface for measuring text using real font metrics.
 type TextMeasurer interface {
-	MeasureText(text string, fontFamily string, fontSize float64) TextMetrics
-	MeasureWord(word string, fontFamily string, fontSize float64) float64
+	MeasureText(text string, fontFamily string, fontSize float64, fontWeight string, fontStyle string) TextMetrics
+	MeasureWord(word string, fontFamily string, fontSize float64, fontWeight string, fontStyle string) float64
 }
 
 // FallbackMeasurer implements TextMeasurer using the byte-count x 0.6 approximation.
 // Used when no real font measurer is available.
 type FallbackMeasurer struct{}
 
-func (f *FallbackMeasurer) MeasureText(text string, fontFamily string, fontSize float64) TextMetrics {
+func (f *FallbackMeasurer) MeasureText(text string, fontFamily string, fontSize float64, fontWeight string, fontStyle string) TextMetrics {
 	width := float64(len(text)) * fontSize * 0.6
 	return TextMetrics{
 		Width:      width,
@@ -30,13 +30,13 @@ func (f *FallbackMeasurer) MeasureText(text string, fontFamily string, fontSize 
 	}
 }
 
-func (f *FallbackMeasurer) MeasureWord(word string, fontFamily string, fontSize float64) float64 {
-	return f.MeasureText(word, fontFamily, fontSize).Width
+func (f *FallbackMeasurer) MeasureWord(word string, fontFamily string, fontSize float64, fontWeight string, fontStyle string) float64 {
+	return f.MeasureText(word, fontFamily, fontSize, fontWeight, fontStyle).Width
 }
 
 // WordWrap breaks text into lines that fit within maxWidth using the given measurer.
 // Returns a slice of line strings.
-func WordWrap(text string, fontFamily string, fontSize float64, maxWidth float64, measurer TextMeasurer) []string {
+func WordWrap(text string, fontFamily string, fontSize float64, maxWidth float64, measurer TextMeasurer, fontWeight string, fontStyle string) []string {
 	if measurer == nil {
 		measurer = &FallbackMeasurer{}
 	}
@@ -53,7 +53,7 @@ func WordWrap(text string, fontFamily string, fontSize float64, maxWidth float64
 		if currentLine != "" {
 			candidate = currentLine + " " + word
 		}
-		w := measurer.MeasureText(candidate, fontFamily, fontSize).Width
+		w := measurer.MeasureText(candidate, fontFamily, fontSize, fontWeight, fontStyle).Width
 		if w > maxWidth && currentLine != "" {
 			lines = append(lines, currentLine)
 			currentLine = word

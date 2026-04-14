@@ -1,6 +1,6 @@
 package layout
 
-import "goglweb/internal/style"
+import "github.com/furkandgn/goglweb/internal/style"
 
 func BuildLayoutTree(styledNode *style.StyledNode) *LayoutBox {
 	root := buildBoxTree(styledNode)

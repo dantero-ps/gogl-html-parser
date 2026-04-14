@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"strings"
 
-	"goglweb/internal/layout"
+	"github.com/furkandgn/goglweb/internal/layout"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	"golang.org/x/image/font"
@@ -38,6 +38,7 @@ type FontAtlas struct {
 	AtlasWidth   int
 	AtlasHeight  int
 	FontSize     float64
+	PixelRatio   float64 // display pixel ratio (e.g. 2.0 for Retina); glyphs rasterized at FontSize*PixelRatio
 }
 
 // GetGlyph returns the character if it exists in atlas, otherwise adds it dynamically.
@@ -151,6 +152,102 @@ func SanitizeFontFamily(fontFamily string) string {
 	return fontFamily
 }
 
+func findStyledFont(fontFamily string, fontWeight string, fontStyle string, extraPaths []string) string {
+	fontFamily = SanitizeFontFamily(fontFamily)
+	if fontFamily == "" {
+		return ""
+	}
+
+	isBold, isItalic := resolveFontOptions(fontWeight, fontStyle)
+	if !isBold && !isItalic {
+		return ""
+	}
+
+	result := searchStyledFontFiles(fontFamily, isBold, isItalic, extraPaths)
+	if result != "" {
+		return result
+	}
+
+	if strings.ToLower(fontFamily) != "arial" {
+		result = searchStyledFontFiles("arial", isBold, isItalic, extraPaths)
+		if result != "" {
+			return result
+		}
+	}
+
+	return ""
+}
+
+func searchStyledFontFiles(fontFamily string, isBold bool, isItalic bool, extraPaths []string) string {
+	fontFamily = SanitizeFontFamily(fontFamily)
+	if fontFamily == "" {
+		return ""
+	}
+
+	var searchPaths []string
+	switch runtime.GOOS {
+	case "windows":
+		searchPaths = []string{os.Getenv("WINDIR") + "\\Fonts"}
+	case "darwin":
+		searchPaths = []string{"/System/Library/Fonts/Supplemental", "/System/Library/Fonts", "/Library/Fonts"}
+	case "linux":
+		searchPaths = []string{"/usr/share/fonts", "/usr/local/share/fonts"}
+	}
+	searchPaths = append(searchPaths, extraPaths...)
+
+	lowerFamily := strings.ToLower(fontFamily)
+	extensions := []string{".ttf", ".otf"}
+
+	for _, root := range searchPaths {
+		var foundPath string
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			name := strings.ToLower(info.Name())
+			for _, ext := range extensions {
+				if !strings.HasSuffix(name, ext) {
+					continue
+				}
+				if !strings.Contains(name, lowerFamily) {
+					continue
+				}
+				if isBold && isItalic {
+					if strings.Contains(name, "bold") && (strings.Contains(name, "italic") || strings.Contains(name, "oblique")) {
+						foundPath = path
+						return filepath.SkipDir
+					}
+				} else if isBold {
+					if strings.Contains(name, "bold") && !strings.Contains(name, "italic") {
+						foundPath = path
+						return filepath.SkipDir
+					}
+				} else if isItalic {
+					if (strings.Contains(name, "italic") || strings.Contains(name, "oblique")) && !strings.Contains(name, "bold") {
+						foundPath = path
+						return filepath.SkipDir
+					}
+				}
+			}
+			return nil
+		})
+		if err == nil && foundPath != "" {
+			return foundPath
+		}
+	}
+
+	return ""
+}
+
+func resolveFontOptions(fontWeight string, fontStyle string) (isBold bool, isItalic bool) {
+	isBold = fontWeight == "bold" || fontWeight == "bolder" || fontWeight == "700" || fontWeight == "800" || fontWeight == "900"
+	isItalic = fontStyle == "italic" || fontStyle == "oblique"
+	return
+}
+
 // findSystemFont finds the file path in the system for the given font family name.
 func findSystemFont(fontFamily string) (string, error) {
 	fontFamily = SanitizeFontFamily(fontFamily)
@@ -197,6 +294,40 @@ func findSystemFont(fontFamily string) (string, error) {
 	return "", fmt.Errorf("font not found: %s", fontFamily)
 }
 
+// findFontInPaths searches extra font directories for the given font family.
+// Returns the first matching file path, or empty string if not found.
+func findFontInPaths(fontFamily string, paths []string) string {
+	fontFamily = SanitizeFontFamily(fontFamily)
+	if fontFamily == "" {
+		return ""
+	}
+	extensions := []string{".ttf", ".otf", ".ttc"}
+	lowerFamily := strings.ToLower(fontFamily)
+	for _, root := range paths {
+		var foundPath string
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			name := strings.ToLower(info.Name())
+			for _, ext := range extensions {
+				if strings.Contains(name, lowerFamily) && strings.HasSuffix(name, ext) {
+					foundPath = path
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		})
+		if err == nil && foundPath != "" {
+			return foundPath
+		}
+	}
+	return ""
+}
+
 // getDefaultFont returns the default font name according to platform.
 func getDefaultFont() string {
 	switch runtime.GOOS {
@@ -213,24 +344,38 @@ func getDefaultFont() string {
 // The fontFamily parameter is ignored (uses the atlas's loaded face).
 // fontSize scales relative to the atlas's base font size.
 func (a *FontAtlas) MeasureText(text string, fontFamily string, fontSize float64) layout.TextMetrics {
+	// Face was rasterized at FontSize*PixelRatio, so raw advance values are in
+	// physical pixels. Divide by PixelRatio to get logical CSS pixels, then
+	// apply the requested fontSize scale relative to our logical FontSize.
+	pr := a.PixelRatio
+	if pr <= 0 {
+		pr = 1.0
+	}
 	scale := fontSize / a.FontSize
-	var totalAdvance fixed.Int26_6
+	// Sum per-character rounded advances to match DrawText's rendering exactly.
+	// DrawText does: currentX += float64(glyph.AdvanceX) / pr
+	// where AdvanceX = adv.Round() (per character). We must use the same
+	// approach here; accumulating fixed.Int26_6 and rounding at the end
+	// introduces per-character rounding drift that shifts inline siblings.
+	var totalAdvancePx float64
 	for _, r := range text {
-		adv, ok := a.Face.GlyphAdvance(r)
-		if !ok {
-			// fallback: estimate from font size
-			adv = fixed.I(int(a.FontSize))
+		glyph, ok := a.GetGlyph(r)
+		var advPx int
+		if ok {
+			advPx = glyph.AdvanceX
+		} else {
+			advPx = int(a.FontSize)
 		}
-		totalAdvance += adv
+		totalAdvancePx += float64(advPx) / pr
 	}
 	metrics := a.Face.Metrics()
-	lineHeight := (metrics.Ascent + metrics.Descent).Round()
-	ascent := metrics.Ascent.Round()
+	lineHeight := float64((metrics.Ascent + metrics.Descent).Round()) / pr
+	ascent := float64(metrics.Ascent.Round()) / pr
 	return layout.TextMetrics{
-		Width:      float64(totalAdvance.Round()) * scale,
-		Height:     float64(lineHeight) * scale,
-		Ascent:     float64(ascent) * scale,
-		LineHeight: float64(lineHeight) * scale * 1.2,
+		Width:      totalAdvancePx * scale,
+		Height:     lineHeight * scale,
+		Ascent:     ascent * scale,
+		LineHeight: lineHeight * scale * 1.2,
 	}
 }
 
@@ -240,7 +385,12 @@ func (a *FontAtlas) MeasureWord(word string, fontFamily string, fontSize float64
 }
 
 // BuildFontAtlas initializes a new dynamic atlas from a font file.
-func (p *GPUPainter) BuildFontAtlas(fontPath string, fontSize float64) (*FontAtlas, error) {
+// pixelRatio is the display pixel density multiplier (e.g. 2.0 for Retina/HiDPI).
+// Glyphs are rasterized at fontSize*pixelRatio for crisp rendering on high-DPI displays.
+func (p *GPUPainter) BuildFontAtlas(fontPath string, fontSize float64, pixelRatio float64) (*FontAtlas, error) {
+	if pixelRatio <= 0 {
+		pixelRatio = 1.0
+	}
 	fontBytes, err := os.ReadFile(fontPath)
 	if err != nil {
 		return nil, err
@@ -257,8 +407,10 @@ func (p *GPUPainter) BuildFontAtlas(fontPath string, fontSize float64) (*FontAtl
 		}
 	}
 
+	// Rasterize at physical pixel size: fontSize * pixelRatio.
+	// This gives full-resolution glyph bitmaps on HiDPI/Retina displays.
 	face, err := opentype.NewFace(f, &opentype.FaceOptions{
-		Size:    fontSize,
+		Size:    fontSize * pixelRatio,
 		DPI:     72,
 		Hinting: font.HintingFull,
 	})
@@ -288,6 +440,7 @@ func (p *GPUPainter) BuildFontAtlas(fontPath string, fontSize float64) (*FontAtl
 		AtlasWidth:  atlasWidth,
 		AtlasHeight: atlasHeight,
 		FontSize:    fontSize,
+		PixelRatio:  pixelRatio,
 		NextX:       5,
 		NextY:       5,
 	}, nil

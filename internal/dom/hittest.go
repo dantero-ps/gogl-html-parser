@@ -1,8 +1,8 @@
 package dom
 
 import (
-	"goglweb/internal/layout"
-	"goglweb/internal/parser/html"
+	"github.com/furkandgn/goglweb/internal/layout"
+	"github.com/furkandgn/goglweb/internal/parser/html"
 )
 
 // HitTestResult represents the result of a hit test

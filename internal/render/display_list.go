@@ -1,12 +1,12 @@
 package render
 
 import (
-	"goglweb/internal/parser/html"
+	"github.com/furkandgn/goglweb/internal/parser/html"
 	"slices"
 	"strconv"
 	"strings"
 
-	"goglweb/internal/layout"
+	"github.com/furkandgn/goglweb/internal/layout"
 )
 
 // Command interface for all rendering operations.
@@ -30,15 +30,19 @@ type DrawBorderCmd struct {
 func (c DrawBorderCmd) Execute(p Painter) { p.DrawBorder(c.Rect, c.Edges, c.Color) }
 
 type DrawTextCmd struct {
-	Text       string
-	X, Y       float64
-	FontSize   float64
-	Color      Color
-	FontFamily string
+	Text           string
+	X, Y           float64
+	FontSize       float64
+	Color          Color
+	FontFamily     string
+	TextAlign      string
+	ContainerWidth float64
+	FontWeight     string
+	FontStyle      string
 }
 
 func (c DrawTextCmd) Execute(p Painter) {
-	p.DrawText(c.Text, c.X, c.Y, c.FontSize, c.Color, c.FontFamily)
+	p.DrawText(c.Text, c.X, c.Y, c.FontSize, c.Color, c.FontFamily, c.TextAlign, c.ContainerWidth, c.FontWeight, c.FontStyle)
 }
 
 type ClipRectCmd struct {
@@ -175,10 +179,20 @@ func renderBox(box *layout.LayoutBox, dl *DisplayList) {
 	}
 
 	// 3. Overflow / Clipping
+	// Clip if overflow:hidden is set, OR if the box has an explicit CSS width (non-auto).
+	// Block boxes with a fixed width don't let content visually escape; this mirrors
+	// how browsers enforce the box model even without explicit overflow:hidden.
 	overflow := getStyleValue(box, "overflow")
-	isClipped := overflow == "hidden"
+	explicitWidth := getStyleValue(box, "width")
+	isClipped := overflow == "hidden" || (overflow != "visible" && explicitWidth != "" && explicitWidth != "auto")
 	if isClipped {
-		dl.Add(ClipRectCmd{Rect: box.Dimensions.Content})
+		clipRect := box.Dimensions.Content
+		// Expand clip to include padding so background is not clipped
+		clipRect.X -= box.Dimensions.Padding.Left
+		clipRect.Y -= box.Dimensions.Padding.Top
+		clipRect.Width += box.Dimensions.Padding.Left + box.Dimensions.Padding.Right
+		clipRect.Height += box.Dimensions.Padding.Top + box.Dimensions.Padding.Bottom
+		dl.Add(ClipRectCmd{Rect: clipRect})
 	}
 
 	// 3b. Scrollable containers: emit BeginScroll/EndScroll

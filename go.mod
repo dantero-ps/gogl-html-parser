@@ -1,6 +1,6 @@
-module goglweb
+module github.com/furkandgn/goglweb
 
-go 1.25.5
+go 1.26
 
 require (
 	github.com/go-gl/gl v0.0.0-20231021071112-07e5d0ea2e71

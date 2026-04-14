@@ -1,11 +1,11 @@
 package dom
 
 import (
-	"goglweb/internal/layout"
-	"goglweb/internal/parser/css"
-	"goglweb/internal/parser/html"
-	"goglweb/internal/render"
-	"goglweb/internal/style"
+	"github.com/furkandgn/goglweb/internal/layout"
+	"github.com/furkandgn/goglweb/internal/parser/css"
+	"github.com/furkandgn/goglweb/internal/parser/html"
+	"github.com/furkandgn/goglweb/internal/render"
+	"github.com/furkandgn/goglweb/internal/style"
 )
 
 // Renderer manages DOM changes and coordinates re-rendering
@@ -106,6 +106,16 @@ func (r *Renderer) MarkDirty() {
 	r.NeedsRepaint = true
 }
 
+// IsDirty returns true if layout or repaint is needed.
+func (r *Renderer) IsDirty() bool {
+	return r.NeedsLayout || r.NeedsRepaint
+}
+
+// ClearDirty resets the repaint flag after a successful render.
+func (r *Renderer) ClearDirty() {
+	r.NeedsRepaint = false
+}
+
 // UpdateStylesheet updates the stylesheet and rebuilds
 func (r *Renderer) UpdateStylesheet(stylesheet *css.Stylesheet) {
 	r.Stylesheet = stylesheet
@@ -114,7 +124,10 @@ func (r *Renderer) UpdateStylesheet(stylesheet *css.Stylesheet) {
 
 // UpdateViewport updates the viewport size
 func (r *Renderer) UpdateViewport(width, height float64) {
+	// Preserve TextMeasurer so font metrics survive the new context
+	prevMeasurer := r.LayoutCtx.TextMeasurer
 	r.LayoutCtx = layout.NewLayoutContext(width, height)
+	r.LayoutCtx.TextMeasurer = prevMeasurer
 	r.ContainingBlock = layout.Dimensions{
 		Content: layout.Rect{
 			X:      0,

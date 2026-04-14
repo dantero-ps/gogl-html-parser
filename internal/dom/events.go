@@ -1,7 +1,7 @@
 package dom
 
 import (
-	"goglweb/internal/parser/html"
+	"github.com/furkandgn/goglweb/internal/parser/html"
 	"reflect"
 )
 

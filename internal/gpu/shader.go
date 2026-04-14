@@ -55,6 +55,38 @@ func NewShader(vertexPath, fragmentPath string) (*Shader, error) {
 	return &Shader{Program: program}, nil
 }
 
+// NewShaderFromSource creates, compiles, and links a shader program from source strings.
+func NewShaderFromSource(vertexSrc, fragmentSrc string) (*Shader, error) {
+	vShader, err := compileShader(vertexSrc+"\x00", gl.VERTEX_SHADER)
+	if err != nil {
+		return nil, err
+	}
+	defer gl.DeleteShader(vShader)
+
+	fShader, err := compileShader(fragmentSrc+"\x00", gl.FRAGMENT_SHADER)
+	if err != nil {
+		return nil, err
+	}
+	defer gl.DeleteShader(fShader)
+
+	program := gl.CreateProgram()
+	gl.AttachShader(program, vShader)
+	gl.AttachShader(program, fShader)
+	gl.LinkProgram(program)
+
+	var status int32
+	gl.GetProgramiv(program, gl.LINK_STATUS, &status)
+	if status == gl.FALSE {
+		var logLength int32
+		gl.GetProgramiv(program, gl.INFO_LOG_LENGTH, &logLength)
+		logMsg := strings.Repeat("\x00", int(logLength))
+		gl.GetProgramInfoLog(program, logLength, nil, gl.Str(logMsg))
+		return nil, fmt.Errorf("failed to link program: %v", logMsg)
+	}
+
+	return &Shader{Program: program}, nil
+}
+
 func compileShader(source string, shaderType uint32) (uint32, error) {
 	shader := gl.CreateShader(shaderType)
 	csources, free := gl.Strs(source)

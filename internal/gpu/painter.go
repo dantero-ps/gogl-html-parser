@@ -3,8 +3,8 @@ package gpu
 import (
 	"fmt"
 
-	"goglweb/internal/layout"
-	"goglweb/internal/render"
+	"github.com/furkandgn/goglweb/internal/layout"
+	"github.com/furkandgn/goglweb/internal/render"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 )
@@ -24,10 +24,17 @@ type GPUPainter struct {
 	// Default white texture - required for sampler2D uniform
 	defaultTexture *Texture
 
-	fontCache map[string]*FontAtlas
+	fontCache   map[string]*atlasCacheEntry
+	accessClock uint64
 
-	// Scroll state stack for nested scrollable containers
+	batchMesh    *DynamicMesh
+	rectVerts    []Vertex
+	glyphBatches map[uint32][]Vertex
+
 	scrollStack []scrollState
+
+	// extraFontPaths are additional directories to search for fonts before system paths.
+	extraFontPaths []string
 }
 
 // scrollState holds the clip rect and offset for a scrollable container.
@@ -35,6 +42,13 @@ type scrollState struct {
 	offsetX, offsetY float64
 	clip             layout.Rect
 }
+
+type atlasCacheEntry struct {
+	atlas      *FontAtlas
+	lastAccess uint64
+}
+
+const maxAtlasCacheSize = 20
 
 // NewGPUPainter creates a new painter object.
 func NewGPUPainter(width, height float64, vertexPath, fragmentPath string) (*GPUPainter, error) {
@@ -66,14 +80,58 @@ func NewGPUPainter(width, height float64, vertexPath, fragmentPath string) (*GPU
 		fbHeight:       height,
 		rectMesh:       rectMesh,
 		defaultTexture: defaultTexture,
-		fontCache:      make(map[string]*FontAtlas),
+		fontCache:      make(map[string]*atlasCacheEntry),
+		batchMesh:      NewDynamicMesh(),
+		rectVerts:      make([]Vertex, 0, 2048),
+		glyphBatches:   make(map[uint32][]Vertex),
 	}
 
 	p.updateProjection()
 	return p, nil
 }
 
-// TextMeasurerAdapter wraps GPUPainter to implement layout.TextMeasurer.
+// NewGPUPainterFromSource creates a new painter from shader source strings instead of file paths.
+func NewGPUPainterFromSource(width, height float64, vertexSrc, fragmentSrc string) (*GPUPainter, error) {
+	shader, err := NewShaderFromSource(vertexSrc, fragmentSrc)
+	if err != nil {
+		return nil, err
+	}
+
+	rectMesh, _ := NewRectMesh(0, 0, 1, 1, 1, 1, 1, 1)
+
+	whitePixel := []byte{255, 255, 255, 255}
+	defaultTexture, err := NewTextureFromData(whitePixel, 1, 1)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create default texture: %w", err)
+	}
+
+	gl.BindTexture(gl.TEXTURE_2D, defaultTexture.ID)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+
+	p := &GPUPainter{
+		shader:         shader,
+		windowWidth:    width,
+		windowHeight:   height,
+		fbWidth:        width,
+		fbHeight:       height,
+		rectMesh:       rectMesh,
+		defaultTexture: defaultTexture,
+		fontCache:      make(map[string]*atlasCacheEntry),
+		batchMesh:      NewDynamicMesh(),
+		rectVerts:      make([]Vertex, 0, 2048),
+		glyphBatches:   make(map[uint32][]Vertex),
+	}
+
+	p.updateProjection()
+	return p, nil
+}
+
+// SetExtraFontPaths sets additional directories to search for fonts.
+func (p *GPUPainter) SetExtraFontPaths(paths []string) {
+	p.extraFontPaths = paths
+}
+
 // Font atlases are loaded lazily when first measured.
 type TextMeasurerAdapter struct {
 	painter *GPUPainter
@@ -84,41 +142,89 @@ func NewTextMeasurerAdapter(p *GPUPainter) layout.TextMeasurer {
 	return &TextMeasurerAdapter{painter: p}
 }
 
-func (a *TextMeasurerAdapter) MeasureText(text string, fontFamily string, fontSize float64) layout.TextMetrics {
-	atlas := a.painter.getOrLoadAtlas(fontFamily, fontSize)
+func (a *TextMeasurerAdapter) MeasureText(text string, fontFamily string, fontSize float64, fontWeight string, fontStyle string) layout.TextMetrics {
+	atlas := a.painter.getOrLoadAtlas(fontFamily, fontSize, fontWeight, fontStyle)
 	if atlas == nil {
 		fb := &layout.FallbackMeasurer{}
-		return fb.MeasureText(text, fontFamily, fontSize)
+		return fb.MeasureText(text, fontFamily, fontSize, fontWeight, fontStyle)
 	}
 	return atlas.MeasureText(text, fontFamily, fontSize)
 }
 
-func (a *TextMeasurerAdapter) MeasureWord(word string, fontFamily string, fontSize float64) float64 {
-	return a.MeasureText(word, fontFamily, fontSize).Width
+func (a *TextMeasurerAdapter) MeasureWord(word string, fontFamily string, fontSize float64, fontWeight string, fontStyle string) float64 {
+	return a.MeasureText(word, fontFamily, fontSize, fontWeight, fontStyle).Width
+}
+
+// pixelRatio returns the display pixel density ratio (physical / logical).
+// On Retina/HiDPI displays this is typically 2.0; on standard displays 1.0.
+func (p *GPUPainter) pixelRatio() float64 {
+	if p.windowWidth <= 0 {
+		return 1.0
+	}
+	r := p.fbWidth / p.windowWidth
+	if r < 1.0 {
+		return 1.0
+	}
+	return r
 }
 
 // getOrLoadAtlas returns (or lazily loads) a FontAtlas for the given family and size.
-func (p *GPUPainter) getOrLoadAtlas(fontFamily string, fontSize float64) *FontAtlas {
+func (p *GPUPainter) getOrLoadAtlas(fontFamily string, fontSize float64, fontWeight string, fontStyle string) *FontAtlas {
 	if fontSize <= 0 {
 		fontSize = 16.0
 	}
-	cacheKey := fmt.Sprintf("%s-%.1f", fontFamily, fontSize)
-	if atlas, ok := p.fontCache[cacheKey]; ok {
-		return atlas
+	pr := p.pixelRatio()
+	cacheKey := fmt.Sprintf("%s-%.1f@%.2f-%s-%s", fontFamily, fontSize, pr, fontWeight, fontStyle)
+	p.accessClock++
+
+	if entry, ok := p.fontCache[cacheKey]; ok {
+		entry.lastAccess = p.accessClock
+		return entry.atlas
 	}
-	fontPath, err := findSystemFont(fontFamily)
-	if err != nil {
-		fontPath, err = findSystemFont(getDefaultFont())
+
+	fontPath := findStyledFont(fontFamily, fontWeight, fontStyle, p.extraFontPaths)
+	if fontPath == "" {
+		var err error
+		fontPath, err = findSystemFont(fontFamily)
 		if err != nil {
-			return nil
+			fontPath = findFontInPaths(fontFamily, p.extraFontPaths)
+			if fontPath == "" {
+				fontPath, err = findSystemFont(getDefaultFont())
+				if err != nil {
+					return nil
+				}
+			}
 		}
 	}
-	atlas, err := p.BuildFontAtlas(fontPath, fontSize)
+	atlas, err := p.BuildFontAtlas(fontPath, fontSize, pr)
 	if err != nil {
 		return nil
 	}
-	p.fontCache[cacheKey] = atlas
+
+	if len(p.fontCache) >= maxAtlasCacheSize {
+		p.evictOldest()
+	}
+
+	p.fontCache[cacheKey] = &atlasCacheEntry{atlas: atlas, lastAccess: p.accessClock}
 	return atlas
+}
+
+func (p *GPUPainter) evictOldest() {
+	var oldestKey string
+	var oldestAccess uint64 = ^uint64(0)
+	for k, e := range p.fontCache {
+		if e.lastAccess < oldestAccess {
+			oldestAccess = e.lastAccess
+			oldestKey = k
+		}
+	}
+	if oldestKey != "" {
+		entry := p.fontCache[oldestKey]
+		if entry.atlas != nil {
+			entry.atlas.Texture.Delete()
+		}
+		delete(p.fontCache, oldestKey)
+	}
 }
 
 // updateProjection sends the projection matrix to the shader.
@@ -160,19 +266,15 @@ func (p *GPUPainter) FillRect(rect layout.Rect, color render.Color) {
 	dx, dy := p.scrollOffset()
 	x := float32(rect.X + dx)
 	y := float32(rect.Y + dy)
-
-	p.shader.Use()
-	p.shader.SetBool("uUseTexture", false)
-
-	// Bind default texture for sampler uniform (OpenGL requirement)
-	p.defaultTexture.Bind(0)
-	p.shader.SetInt("uTexture", 0)
-
+	w := float32(rect.Width)
+	h := float32(rect.Height)
 	r, g, b, a := normalizeColor(color)
-
-	// Update mesh data and draw
-	p.updateRectMesh(x, y, float32(rect.Width), float32(rect.Height), r, g, b, a)
-	p.rectMesh.Draw()
+	p.rectVerts = append(p.rectVerts,
+		Vertex{[2]float32{x, y}, [4]float32{r, g, b, a}, [2]float32{0, 0}},
+		Vertex{[2]float32{x + w, y}, [4]float32{r, g, b, a}, [2]float32{1, 0}},
+		Vertex{[2]float32{x + w, y + h}, [4]float32{r, g, b, a}, [2]float32{1, 1}},
+		Vertex{[2]float32{x, y + h}, [4]float32{r, g, b, a}, [2]float32{0, 1}},
+	)
 }
 
 // DrawBorder draws borders.
@@ -193,97 +295,117 @@ func (p *GPUPainter) DrawBorder(rect layout.Rect, borders layout.EdgeSizes, colo
 }
 
 // DrawText draws text to the screen. Automatically handles UTF-8 characters.
-func (p *GPUPainter) DrawText(text string, x, y float64, fontSize float64, color render.Color, fontFamily string) {
+func (p *GPUPainter) DrawText(text string, x, y float64, fontSize float64, color render.Color, fontFamily string, textAlign string, containerWidth float64, fontWeight string, fontStyle string) {
 	dx, dy := p.scrollOffset()
 	x += dx
 	y += dy
-	// 1. Get Font Atlas from cache or create it
-	cacheKey := fmt.Sprintf("%s-%.1f", fontFamily, fontSize)
-	atlas, ok := p.fontCache[cacheKey]
 
-	if !ok {
-		fontPath, err := findSystemFont(fontFamily)
-		if err != nil {
-			fmt.Printf("Font not found: %s, falling back to default\n", fontFamily)
-			fontPath, err = findSystemFont(getDefaultFont())
-			if err != nil {
-				fmt.Printf("Default font not found: %v\n", err)
-				return
+	atlas := p.getOrLoadAtlas(fontFamily, fontSize, fontWeight, fontStyle)
+	if atlas == nil {
+		return
+	}
+
+	r, g, b, a := normalizeColor(color)
+	texID := atlas.Texture.ID
+
+	// Glyphs were rasterized at PixelRatio× the CSS font size.
+	// Divide all physical pixel dimensions by PixelRatio to get logical CSS pixel sizes
+	// so the quads match the layout geometry while sampling full-resolution glyph texels.
+	pr := atlas.PixelRatio
+	if pr <= 0 {
+		pr = 1.0
+	}
+
+	faceMetrics := atlas.Face.Metrics()
+	ascent := float64(faceMetrics.Ascent.Round()) / pr
+	descent := float64(faceMetrics.Descent.Round()) / pr
+	lineHeight := (ascent + descent) * 1.2
+
+	var lines []string
+	if containerWidth > 0 {
+		measurer := &TextMeasurerAdapter{painter: p}
+		lines = layout.WordWrap(text, fontFamily, fontSize, containerWidth, measurer, fontWeight, fontStyle)
+	}
+	if len(lines) == 0 {
+		lines = []string{text}
+	}
+
+	currentY := y
+	for _, line := range lines {
+		var lineX float64 = x
+		if (textAlign == "center" || textAlign == "right") && containerWidth > 0 {
+			var textWidth float64
+			for _, char := range line {
+				if glyph, ok := atlas.GetGlyph(char); ok {
+					textWidth += float64(glyph.AdvanceX) / pr
+				}
+			}
+			switch textAlign {
+			case "center":
+				lineX += (containerWidth - textWidth) / 2
+			case "right":
+				lineX += containerWidth - textWidth
 			}
 		}
 
-		newAtlas, err := p.BuildFontAtlas(fontPath, fontSize)
-		if err != nil {
-			fmt.Printf("Failed to create font atlas: %v\n", err)
-			return
-		}
-		p.fontCache[cacheKey] = newAtlas
-		atlas = newAtlas
-	}
+		currentX := lineX
+		for _, char := range line {
+			glyph, ok := atlas.GetGlyph(char)
+			if !ok {
+				continue
+			}
 
-	// 2. Shader Preparation
-	p.shader.Use()
-	p.shader.SetBool("uUseTexture", true)
+			posX := float32(currentX + float64(glyph.BearingX)/pr)
+			posY := float32(currentY + float64(glyph.BearingY)/pr)
+			w := float32(float64(glyph.Width) / pr)
+			h := float32(float64(glyph.Height) / pr)
 
-	// Alpha Blending (critical for text transparency)
-	gl.Enable(gl.BLEND)
-	gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+			u0 := float32(glyph.X) / float32(atlas.AtlasWidth)
+			v0 := float32(glyph.Y) / float32(atlas.AtlasHeight)
+			u1 := float32(glyph.X+glyph.Width) / float32(atlas.AtlasWidth)
+			v1 := float32(glyph.Y+glyph.Height) / float32(atlas.AtlasHeight)
 
-	atlas.Texture.Bind(0)
-	p.shader.SetInt("uTexture", 0)
-
-	r, g, b, a := normalizeColor(color)
-
-	// 3. Draw Characters
-	currentX := x
-
-	// Convert text to runes (UTF-8)
-	for _, char := range text {
-		glyph, ok := atlas.GetGlyph(char)
-		if !ok {
-			fmt.Printf("Skipped character: %c\n", char)
-			continue
+			p.glyphBatches[texID] = append(p.glyphBatches[texID],
+				Vertex{[2]float32{posX, posY}, [4]float32{r, g, b, a}, [2]float32{u0, v0}},
+				Vertex{[2]float32{posX + w, posY}, [4]float32{r, g, b, a}, [2]float32{u1, v0}},
+				Vertex{[2]float32{posX + w, posY + h}, [4]float32{r, g, b, a}, [2]float32{u1, v1}},
+				Vertex{[2]float32{posX, posY + h}, [4]float32{r, g, b, a}, [2]float32{u0, v1}},
+			)
+			currentX += float64(glyph.AdvanceX) / pr
 		}
 
-		// Position calculation: x + bearingX, y - bearingY (bearingY above baseline, usually positive?)
-		// Note: BearingY is bounds.Min.Y, usually negative. Treat y as baseline, shift up with + BearingY.
-		posX := float32(currentX + float64(glyph.BearingX))
-		posY := float32(y - float64(atlas.Face.Metrics().Ascent.Round()) + float64(glyph.BearingY) + float64(atlas.Face.Metrics().Ascent.Round())) // Baseline adjustment
-		// Simple: If text shifts down, use y + fontSize or ascent.
-		// For testing: posY = float32(y) + float32(glyph.BearingY)  # If BearingY is negative, shifts up.
-
-		w := float32(glyph.Width)
-		h := float32(glyph.Height)
-
-		// Calculate UV coordinates within atlas
-		u0 := float32(glyph.X) / float32(atlas.AtlasWidth)
-		v0 := float32(glyph.Y) / float32(atlas.AtlasHeight)
-		u1 := float32(glyph.X+glyph.Width) / float32(atlas.AtlasWidth)
-		v1 := float32(glyph.Y+glyph.Height) / float32(atlas.AtlasHeight)
-
-		// Update mesh data with this character's coordinates
-		p.updateRectMeshWithUV(posX, posY, w, h, u0, v0, u1, v1, r, g, b, a)
-
-		p.rectMesh.Draw()
-
-		// Advance to next character
-		currentX += float64(glyph.AdvanceX)
+		currentY += lineHeight
 	}
-
-	gl.Disable(gl.BLEND)
 }
 
-// updateRectMeshWithUV updates the existing rectMesh with both coordinates and custom UV.
-func (p *GPUPainter) updateRectMeshWithUV(x, y, w, h, u0, v0, u1, v1, r, g, b, a float32) {
-	vertices := []Vertex{
-		{[2]float32{x, y}, [4]float32{r, g, b, a}, [2]float32{u0, v0}},         // Top Left
-		{[2]float32{x + w, y}, [4]float32{r, g, b, a}, [2]float32{u1, v0}},     // Top Right
-		{[2]float32{x + w, y + h}, [4]float32{r, g, b, a}, [2]float32{u1, v1}}, // Bottom Right
-		{[2]float32{x, y + h}, [4]float32{r, g, b, a}, [2]float32{u0, v1}},     // Bottom Left
+func (p *GPUPainter) Flush() {
+	p.shader.Use()
+
+	if len(p.rectVerts) > 0 {
+		p.shader.SetBool("uUseTexture", false)
+		p.defaultTexture.Bind(0)
+		p.shader.SetInt("uTexture", 0)
+		p.batchMesh.Upload(p.rectVerts)
+		p.batchMesh.DrawQuads(len(p.rectVerts) / 4)
+		p.rectVerts = p.rectVerts[:0]
 	}
 
-	gl.BindBuffer(gl.ARRAY_BUFFER, p.rectMesh.VBO)
-	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*32, gl.Ptr(vertices))
+	if len(p.glyphBatches) > 0 {
+		gl.Enable(gl.BLEND)
+		gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+		p.shader.SetBool("uUseTexture", true)
+		p.shader.SetInt("uTexture", 0)
+		for texID, verts := range p.glyphBatches {
+			if len(verts) == 0 {
+				continue
+			}
+			gl.BindTexture(gl.TEXTURE_2D, texID)
+			p.batchMesh.Upload(verts)
+			p.batchMesh.DrawQuads(len(verts) / 4)
+			delete(p.glyphBatches, texID)
+		}
+		gl.Disable(gl.BLEND)
+	}
 }
 
 // SetClip sets the clipping area using scissor test.
@@ -323,12 +445,14 @@ func (p *GPUPainter) scrollOffset() (dx, dy float64) {
 
 // BeginScroll activates scroll clipping and translation for a scrollable container.
 func (p *GPUPainter) BeginScroll(clipRect layout.Rect, offsetX, offsetY float64) {
+	p.Flush()
 	p.scrollStack = append(p.scrollStack, scrollState{offsetX: offsetX, offsetY: offsetY, clip: clipRect})
 	p.SetClip(clipRect)
 }
 
 // EndScroll deactivates scroll clipping for a scrollable container.
 func (p *GPUPainter) EndScroll() {
+	p.Flush()
 	if len(p.scrollStack) > 0 {
 		p.scrollStack = p.scrollStack[:len(p.scrollStack)-1]
 	}
@@ -339,21 +463,10 @@ func (p *GPUPainter) EndScroll() {
 	}
 }
 
-func (p *GPUPainter) updateRectMesh(x, y, w, h, r, g, b, a float32) {
-	vertices := []Vertex{
-		{[2]float32{x, y}, [4]float32{r, g, b, a}, [2]float32{0, 0}},
-		{[2]float32{x + w, y}, [4]float32{r, g, b, a}, [2]float32{1, 0}},
-		{[2]float32{x + w, y + h}, [4]float32{r, g, b, a}, [2]float32{1, 1}},
-		{[2]float32{x, y + h}, [4]float32{r, g, b, a}, [2]float32{0, 1}},
-	}
-
-	gl.BindBuffer(gl.ARRAY_BUFFER, p.rectMesh.VBO)
-	gl.BufferSubData(gl.ARRAY_BUFFER, 0, len(vertices)*32, gl.Ptr(vertices)) // 32 = vertex size in bytes
-}
-
 func (p *GPUPainter) Delete() {
 	p.shader.Delete()
 	p.rectMesh.Delete()
+	p.batchMesh.Delete()
 	if p.defaultTexture != nil {
 		p.defaultTexture.Delete()
 	}

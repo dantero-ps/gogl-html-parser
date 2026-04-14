@@ -1,6 +1,6 @@
 package layout
 
-import "goglweb/internal/style"
+import "github.com/furkandgn/goglweb/internal/style"
 
 type Rect struct {
 	X      float64
@@ -94,9 +94,21 @@ type LayoutBox struct {
 	Parent     *LayoutBox
 	TextAscent float64 // distance from content top to baseline, set for text nodes
 
+	// Inline flow fields — set by layoutInline for text nodes that wrap.
+	// LastLineWidth is the width of the final wrapped line (used by anonymous
+	// box flow so the next sibling continues on the same line).
+	// NumLines is how many wrapped lines the text produces.
+	LastLineWidth float64
+	NumLines      int
+
 	// Positioned layout fields
 	PositionType     string       // "static" | "relative" | "absolute" | "fixed"
 	DeferredAbsolute []*LayoutBox // absolute/fixed children deferred to second pass
+
+	// WrapWidth is the effective word-wrap width for this text node when it has
+	// been re-wrapped to make room for subsequent inline siblings. When non-zero,
+	// the GPU renderer uses this instead of the full block-container width.
+	WrapWidth float64
 
 	// Scroll fields
 	ScrollOffsetX  float64 // pixels scrolled horizontally (positive = scrolled right)
@@ -105,7 +117,6 @@ type LayoutBox struct {
 	ChildrenHeight float64 // total height occupied by children (used for scroll bounds)
 }
 
-// IsScrollable returns true if this box clips and scrolls its content.
 func (box *LayoutBox) IsScrollable() bool {
 	return box.Overflow == "scroll" || box.Overflow == "auto"
 }

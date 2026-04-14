@@ -89,12 +89,28 @@ func (t *Tokenizer) NextToken() Token {
 		return Token{Type: TokenIdent, Value: t.input[start:t.pos]}
 	}
 
-	// Ident (letters, numbers, -, _)
+	// Ident (letters, numbers, -, _) — may be followed by a CSS function call like rgb(...)
 	start := t.pos
 	for t.pos < len(t.input) && isIdentChar(t.input[t.pos]) {
 		t.pos++
 	}
 	if start < t.pos {
+		// If immediately followed by '(', consume the entire function call including nested parens
+		if t.pos < len(t.input) && t.input[t.pos] == '(' {
+			depth := 0
+			for t.pos < len(t.input) {
+				ch := t.input[t.pos]
+				t.pos++
+				if ch == '(' {
+					depth++
+				} else if ch == ')' {
+					depth--
+					if depth == 0 {
+						break
+					}
+				}
+			}
+		}
 		return Token{Type: TokenIdent, Value: t.input[start:t.pos]}
 	}
 
