@@ -2263,13 +2263,27 @@ p.lead {
 			cont)
 	}
 
-	// First two children (text + span "inline spans") should be on the same line.
-	// The third text node (" inside block elements.") may wrap to a new line depending
-	// on container width, which is correct behavior.
+	// When a child overflows the available space, it wraps to the next line normally.
+	// The previous text is NOT re-wrapped; only the overflowing child moves down.
 	if len(anonBox.Children) >= 2 {
-		if anonBox.Children[1].Dimensions.Content.Y != anonBox.Children[0].Dimensions.Content.Y {
-			t.Errorf("span Y (%.1f) should be on same line as first text Y (%.1f)",
-				anonBox.Children[1].Dimensions.Content.Y, anonBox.Children[0].Dimensions.Content.Y)
+		firstText := anonBox.Children[0]
+		spanBox := anonBox.Children[1]
+
+		// The span overflows so it wraps to the next line below the first text.
+		expectedSpanY := firstText.Dimensions.Content.Y + firstText.Dimensions.Content.Height/float64(firstText.NumLines)
+		if firstText.NumLines == 1 {
+			expectedSpanY = firstText.Dimensions.Content.Y + firstText.Dimensions.Content.Height
+		}
+		if math.Abs(spanBox.Dimensions.Content.Y-expectedSpanY) > 0.1 {
+			t.Errorf("span Y (%.1f) should be on the line after first text (%.1f)",
+				spanBox.Dimensions.Content.Y, expectedSpanY)
+		}
+
+		// Span X starts at the container left (beginning of the new line).
+		expectedX := anonBox.Dimensions.Content.X
+		if math.Abs(spanBox.Dimensions.Content.X-expectedX) > 0.1 {
+			t.Errorf("span X (%.1f) should be at container left (%.1f)",
+				spanBox.Dimensions.Content.X, expectedX)
 		}
 	}
 
@@ -2291,9 +2305,9 @@ func TestMultiLineInlineSpanFlow(t *testing.T) {
 	// Build: <p>AAA BBB CCC DDD <span>EEE</span> FFF</p>
 	// charWidth=10, container=120px → "AAA BBB CCC DDD " wraps to:
 	//   Line 1: "AAA BBB CCC"  (110px)
-	//   Line 2: "DDD"          (30px)
-	// LastLineWidth=30, NumLines=2
-	// Span "EEE" (30px) should start at X=30 on line 2 (Y = firstText.Y + lineHeight)
+	//   Line 2: "DDD "         (40px, trailing space included)
+	// LastLineWidth=40, NumLines=2
+	// Span "EEE" (30px) should start at X=40 on line 2 (Y = firstText.Y + lineHeight)
 	// " FFF" should follow span on the same line.
 
 	root := &html.Node{
@@ -2394,9 +2408,9 @@ func TestMultiLineInlineSpanFlow(t *testing.T) {
 		t.Errorf("firstText.NumLines = %d, want 2", firstText.NumLines)
 	}
 
-	// LastLineWidth of "DDD" = 3 chars * 10 = 30px.
-	if math.Abs(firstText.LastLineWidth-30.0) > 0.1 {
-		t.Errorf("firstText.LastLineWidth = %.2f, want 30.0", firstText.LastLineWidth)
+	// LastLineWidth of "DDD " = 4 chars * 10 = 40px (trailing space included in measurement).
+	if math.Abs(firstText.LastLineWidth-40.0) > 0.1 {
+		t.Errorf("firstText.LastLineWidth = %.2f, want 40.0", firstText.LastLineWidth)
 	}
 
 	// lineHeight = lineH * 1.2 = 16 * 1.2 = 19.2
@@ -2421,5 +2435,100 @@ func TestMultiLineInlineSpanFlow(t *testing.T) {
 	expectedLastTextX := spanBox.Dimensions.Content.X + spanBox.Dimensions.Content.Width
 	if math.Abs(lastText.Dimensions.Content.X-expectedLastTextX) > 0.1 {
 		t.Errorf("lastText X = %.2f, want %.2f (span.X + span.Width)", lastText.Dimensions.Content.X, expectedLastTextX)
+	}
+}
+
+// TestSpanInnerTextXAfterOut1 verifies that the text node inside a <span>
+// is positioned to the right of the preceding "out1" text node.
+//
+// Layout: <p>out1 <span>in span text</span> out2</p>
+//
+// The span's inner text node X must be >= out1.X + out1.Width.
+// This catches the bug where layoutInline resets the inner text's X
+// to the containing-block's left edge instead of continuing the inline cursor.
+func TestSpanInnerTextXAfterOut1(t *testing.T) {
+	root := &html.Node{
+		TagName: "p",
+		Type:    html.ElementNode,
+		Children: []*html.Node{
+			{Type: html.TextNode, Content: "out1 "},
+			{
+				TagName: "span",
+				Type:    html.ElementNode,
+				Children: []*html.Node{
+					{Type: html.TextNode, Content: "in span text"},
+				},
+			},
+			{Type: html.TextNode, Content: " out2"},
+		},
+	}
+
+	styledRoot := &style.StyledNode{
+		Node:            root,
+		SpecifiedValues: style.PropertyMap{"display": "block"},
+		Children: []*style.StyledNode{
+			{
+				Node:            root.Children[0],
+				SpecifiedValues: style.PropertyMap{},
+			},
+			{
+				Node:            root.Children[1],
+				SpecifiedValues: style.PropertyMap{"display": "inline"},
+				Children: []*style.StyledNode{
+					{
+						Node:            root.Children[1].Children[0],
+						SpecifiedValues: style.PropertyMap{},
+					},
+				},
+			},
+			{
+				Node:            root.Children[2],
+				SpecifiedValues: style.PropertyMap{},
+			},
+		},
+	}
+
+	layoutTree := BuildLayoutTree(styledRoot)
+	// charWidth=10 → "out1 " = 50px, "in span text" = 120px, " out2" = 50px
+	// Container 800px — everything fits on one line.
+	measurer := &mockMeasurer{charWidth: 10.0, fontSize: 16.0, lineH: 16.0}
+	ctx := NewLayoutContext(800, 600)
+	ctx.TextMeasurer = measurer
+	containingBlock := Dimensions{Content: Rect{X: 0, Y: 0, Width: 800, Height: 600}}
+	layoutTree.LayoutWithContext(containingBlock, ctx)
+
+	if len(layoutTree.Children) == 0 {
+		t.Fatal("expected at least one child (anonymous box) under <p>")
+	}
+	anonBox := layoutTree.Children[0]
+	if len(anonBox.Children) < 2 {
+		t.Fatalf("expected at least 2 inline children in anonymous box, got %d", len(anonBox.Children))
+	}
+
+	out1Box := anonBox.Children[0] // text node "out1 "
+	spanBox := anonBox.Children[1] // <span>
+
+	t.Logf("out1: X=%.1f W=%.1f", out1Box.Dimensions.Content.X, out1Box.Dimensions.Content.Width)
+	t.Logf("span: X=%.1f W=%.1f", spanBox.Dimensions.Content.X, spanBox.Dimensions.Content.Width)
+
+	out1End := out1Box.Dimensions.Content.X + out1Box.Dimensions.Content.Width
+
+	// The span box must start at or after out1's right edge.
+	if spanBox.Dimensions.Content.X < out1End {
+		t.Errorf("span X (%.1f) < out1.X + out1.Width (%.1f): span overlaps out1",
+			spanBox.Dimensions.Content.X, out1End)
+	}
+
+	// The span's inner text node must also start at or after out1's right edge.
+	if len(spanBox.Children) == 0 {
+		t.Fatal("span box has no children (expected inner text node)")
+	}
+	innerText := spanBox.Children[0]
+	t.Logf("inner text: X=%.1f W=%.1f", innerText.Dimensions.Content.X, innerText.Dimensions.Content.Width)
+
+	if innerText.Dimensions.Content.X < out1End {
+		t.Errorf("span inner text X (%.1f) < out1.X + out1.Width (%.1f): "+
+			"inner text node starts before out1 ends",
+			innerText.Dimensions.Content.X, out1End)
 	}
 }

@@ -277,10 +277,23 @@ func findSystemFont(fontFamily string) (string, error) {
 			name := strings.ToLower(info.Name())
 			lowerFamily := strings.ToLower(fontFamily)
 			for _, ext := range extensions {
-				if strings.Contains(name, lowerFamily) && strings.HasSuffix(name, ext) {
-					foundPath = path
-					return filepath.SkipDir
+				if !strings.HasSuffix(name, ext) {
+					continue
 				}
+				if !strings.Contains(name, lowerFamily) {
+					continue
+				}
+				// Skip styled variants when searching for the regular face.
+				stem := strings.TrimSuffix(name, ext)
+				rest := strings.TrimSpace(strings.ReplaceAll(stem, lowerFamily, ""))
+				if strings.Contains(rest, "bold") || strings.Contains(rest, "italic") ||
+					strings.Contains(rest, "oblique") || strings.Contains(rest, "light") ||
+					strings.Contains(rest, "medium") || strings.Contains(rest, "thin") ||
+					strings.Contains(rest, "black") || strings.Contains(rest, "heavy") {
+					continue
+				}
+				foundPath = path
+				return filepath.SkipDir
 			}
 			return nil
 		})
@@ -326,6 +339,59 @@ func findFontInPaths(fontFamily string, paths []string) string {
 		}
 	}
 	return ""
+}
+
+// resolveGenericFamily maps a CSS generic font family keyword to a concrete
+// platform-specific font name. If the input is not a recognised generic keyword
+// it is returned unchanged.
+func resolveGenericFamily(family string) string {
+	switch strings.ToLower(strings.TrimSpace(family)) {
+	case "serif":
+		switch runtime.GOOS {
+		case "darwin", "windows":
+			return "Times New Roman"
+		default:
+			return "DejaVu Serif"
+		}
+	case "sans-serif":
+		switch runtime.GOOS {
+		case "darwin":
+			return "Helvetica"
+		case "windows":
+			return "Arial"
+		default:
+			return "DejaVu Sans"
+		}
+	case "monospace":
+		switch runtime.GOOS {
+		case "darwin":
+			return "Menlo"
+		case "windows":
+			return "Consolas"
+		default:
+			return "DejaVu Sans Mono"
+		}
+	}
+	return family
+}
+
+// resolveFontFamilyList takes a CSS font-family value (which may be a
+// comma-separated list such as "Inter, serif") and returns the resolved
+// concrete family name for the first entry in the list.
+func resolveFontFamilyList(fontFamily string) string {
+	if fontFamily == "" {
+		return ""
+	}
+	// Take the first entry from a comma-separated list.
+	first := fontFamily
+	if idx := strings.Index(fontFamily, ","); idx >= 0 {
+		first = fontFamily[:idx]
+	}
+	// Strip surrounding quotes and whitespace.
+	first = strings.TrimSpace(first)
+	first = strings.Trim(first, `"'`)
+	first = strings.TrimSpace(first)
+	return resolveGenericFamily(first)
 }
 
 // getDefaultFont returns the default font name according to platform.

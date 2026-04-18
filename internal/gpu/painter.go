@@ -173,6 +173,9 @@ func (p *GPUPainter) getOrLoadAtlas(fontFamily string, fontSize float64, fontWei
 	if fontSize <= 0 {
 		fontSize = 16.0
 	}
+	// Resolve font-family list and generic keywords before cache lookup so that
+	// both the cache key and font-file search use the same concrete family name.
+	fontFamily = resolveFontFamilyList(fontFamily)
 	pr := p.pixelRatio()
 	cacheKey := fmt.Sprintf("%s-%.1f@%.2f-%s-%s", fontFamily, fontSize, pr, fontWeight, fontStyle)
 	p.accessClock++

@@ -45,9 +45,6 @@ func RenderText(box *layout.LayoutBox, dl *DisplayList) {
 
 	// Font Family
 	fontFamily := getStyleValue(box, "font-family")
-	if fontFamily == "" {
-		fontFamily = "Helvetica"
-	}
 
 	fontWeight := getStyleValue(box, "font-weight")
 	fontStyle := getStyleValue(box, "font-style")

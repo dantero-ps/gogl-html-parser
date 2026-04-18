@@ -1,6 +1,7 @@
 package render
 
 import (
+	"fmt"
 	"github.com/furkandgn/goglweb/internal/parser/html"
 	"slices"
 	"strconv"
@@ -93,6 +94,49 @@ func (dl *DisplayList) Execute(painter Painter) {
 	for _, cmd := range dl.Commands {
 		cmd.Execute(painter)
 	}
+}
+
+func (dl *DisplayList) String() string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("DisplayList (%d commands):\n", len(dl.Commands)))
+
+	for i, cmd := range dl.Commands {
+		sb.WriteString(fmt.Sprintf("[%d] ", i))
+
+		switch c := cmd.(type) {
+		case FillRectCmd:
+			sb.WriteString(fmt.Sprintf("FillRect: Rect(%v, %v, %v, %v) Color(R:%d, G:%d, B:%d, A:%d)\n",
+				c.Rect.X, c.Rect.Y, c.Rect.Width, c.Rect.Height,
+				c.Color.R, c.Color.G, c.Color.B, c.Color.A))
+		case DrawBorderCmd:
+			sb.WriteString(fmt.Sprintf("DrawBorder: Rect(%v, %v, %v, %v) Edges(L:%v, R:%v, T:%v, B:%v) Color(R:%d, G:%d, B:%d, A:%d)\n",
+				c.Rect.X, c.Rect.Y, c.Rect.Width, c.Rect.Height,
+				c.Edges.Left, c.Edges.Right, c.Edges.Top, c.Edges.Bottom,
+				c.Color.R, c.Color.G, c.Color.B, c.Color.A))
+		case DrawTextCmd:
+			sb.WriteString(fmt.Sprintf("DrawText: Text(%q) Pos(%v, %v) FontSize(%v) Color(R:%d, G:%d, B:%d, A:%d) Font(%s, %s, %s) Align(%s) ContainerWidth(%v)\n",
+				c.Text, c.X, c.Y, c.FontSize,
+				c.Color.R, c.Color.G, c.Color.B, c.Color.A,
+				c.FontFamily, c.FontWeight, c.FontStyle, c.TextAlign, c.ContainerWidth))
+		case ClipRectCmd:
+			if c.Clear {
+				sb.WriteString("ClipRect: ClearClip\n")
+			} else {
+				sb.WriteString(fmt.Sprintf("ClipRect: Rect(%v, %v, %v, %v)\n",
+					c.Rect.X, c.Rect.Y, c.Rect.Width, c.Rect.Height))
+			}
+		case BeginScrollCmd:
+			sb.WriteString(fmt.Sprintf("BeginScroll: ClipRect(%v, %v, %v, %v) Offset(%v, %v)\n",
+				c.ClipRect.X, c.ClipRect.Y, c.ClipRect.Width, c.ClipRect.Height,
+				c.OffsetX, c.OffsetY))
+		case EndScrollCmd:
+			sb.WriteString("EndScroll\n")
+		default:
+			sb.WriteString(fmt.Sprintf("Unknown command: %T\n", cmd))
+		}
+	}
+
+	return sb.String()
 }
 
 // BuildDisplayList traverses the LayoutBox tree and generates commands.

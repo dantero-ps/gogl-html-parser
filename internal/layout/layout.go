@@ -216,11 +216,6 @@ func (box *LayoutBox) layoutAnonymous(containingBlock Dimensions, ctx *LayoutCon
 	currentY := box.Dimensions.Content.Y
 	lineHeight := 0.0
 
-	// Track the most recent text-node child that started a line at `left`,
-	// so we can re-wrap it when a subsequent sibling overflows the line.
-	var lastTextChild *LayoutBox
-	lastTextChildLineY := currentY
-
 	for _, child := range box.Children {
 		// Layout child with currentX so it positions itself correctly.
 		// Full container width is passed so the child can word-wrap normally.
@@ -249,13 +244,6 @@ func (box *LayoutBox) layoutAnonymous(containingBlock Dimensions, ctx *LayoutCon
 			currentY += advanceY
 			currentX = left + child.LastLineWidth
 			lineHeight = wrappedLineH
-			// A multi-line text child now acts as the "line start" text node.
-			if isTextNode(child) {
-				lastTextChild = child
-				lastTextChildLineY = currentY - advanceY // start of this whole block
-			} else {
-				lastTextChild = nil
-			}
 		} else {
 			// Single-line child: advance X by its width.
 			childWidth := child.Dimensions.Content.Width
@@ -265,123 +253,48 @@ func (box *LayoutBox) layoutAnonymous(containingBlock Dimensions, ctx *LayoutCon
 
 			// Overflow check.
 			if currentX+childWidth > right && currentX > left {
-				// Before wrapping to a new line, try re-wrapping the most recent
-				// text-node sibling (lastTextChild) with a reduced width so that
-				// this child can follow on the same line.
-				rewrapped := false
-				if lastTextChild != nil && isTextNode(lastTextChild) {
-					spaceNeeded := childWidth
-					maxWidthForPrev := right - left - spaceNeeded
-					// Only attempt if the reduced width would actually cause text to wrap.
-					if maxWidthForPrev > 0 && lastTextChild.Dimensions.Content.Width > maxWidthForPrev {
-						lastTextChild.WrapWidth = maxWidthForPrev
-						lastTextChild.LayoutWithContext(Dimensions{
-							Content: Rect{
-								X:      left,
-								Y:      lastTextChildLineY,
-								Width:  maxWidthForPrev,
-								Height: containingBlock.Content.Height,
-							},
-						}, ctx)
-						if lastTextChild.NumLines > 1 {
-							lh := lastTextChild.Dimensions.Content.Height / float64(lastTextChild.NumLines)
-							currentY = lastTextChildLineY + lh*float64(lastTextChild.NumLines-1)
-							currentX = left + lastTextChild.LastLineWidth
-							lineHeight = lh
-						} else {
-							currentX = left + lastTextChild.LastLineWidth
-							currentY = lastTextChildLineY
-						}
-						// Re-layout the current child at the updated position.
-						child.LayoutWithContext(Dimensions{
-							Content: Rect{
-								X:      currentX,
-								Y:      currentY,
-								Width:  containingBlock.Content.Width,
-								Height: containingBlock.Content.Height,
-							},
-						}, ctx)
-						childLineH = child.Dimensions.Content.Height
-						if child.NumLines > 1 {
-							childLineH = child.Dimensions.Content.Height / float64(child.NumLines)
-						}
-						if childLineH > lineHeight {
-							lineHeight = childLineH
-						}
-						childWidth = child.Dimensions.Content.Width
-						if child.LastLineWidth > 0 {
-							childWidth = child.LastLineWidth
-						}
-						if child.NumLines > 1 {
-							wrappedLineH := child.Dimensions.Content.Height / float64(child.NumLines)
-							advanceY := wrappedLineH * float64(child.NumLines-1)
-							currentY += advanceY
-							currentX = left + child.LastLineWidth
-							lineHeight = wrappedLineH
-						} else {
-							currentX += childWidth
-						}
-						lastTextChild = nil
-						rewrapped = true
-					}
+				// Regular line wrap.
+				currentY += lineHeight
+				currentX = left
+				lineHeight = 0
+
+				child.LayoutWithContext(Dimensions{
+					Content: Rect{
+						X:      currentX,
+						Y:      currentY,
+						Width:  containingBlock.Content.Width,
+						Height: containingBlock.Content.Height,
+					},
+				}, ctx)
+
+				childLineH = child.Dimensions.Content.Height
+				if child.NumLines > 1 {
+					childLineH = child.Dimensions.Content.Height / float64(child.NumLines)
 				}
-
-				if !rewrapped {
-					// Regular line wrap.
-					currentY += lineHeight
-					currentX = left
-					lineHeight = 0
-					lastTextChild = nil
-					lastTextChildLineY = currentY
-
-					child.LayoutWithContext(Dimensions{
-						Content: Rect{
-							X:      currentX,
-							Y:      currentY,
-							Width:  containingBlock.Content.Width,
-							Height: containingBlock.Content.Height,
-						},
-					}, ctx)
-
-					childLineH = child.Dimensions.Content.Height
-					if child.NumLines > 1 {
-						childLineH = child.Dimensions.Content.Height / float64(child.NumLines)
+				if childLineH > lineHeight {
+					lineHeight = childLineH
+				}
+				if child.NumLines > 1 {
+					wrappedLineH := child.Dimensions.Content.Height / float64(child.NumLines)
+					advanceY := wrappedLineH * float64(child.NumLines-1)
+					currentY += advanceY
+					currentX = left + child.LastLineWidth
+					lineHeight = wrappedLineH
+				} else {
+					childWidth = child.Dimensions.Content.Width
+					if child.LastLineWidth > 0 {
+						childWidth = child.LastLineWidth
 					}
-					if childLineH > lineHeight {
-						lineHeight = childLineH
-					}
-					if child.NumLines > 1 {
-						wrappedLineH := child.Dimensions.Content.Height / float64(child.NumLines)
-						advanceY := wrappedLineH * float64(child.NumLines-1)
-						currentY += advanceY
-						currentX = left + child.LastLineWidth
-						lineHeight = wrappedLineH
-					} else {
-						childWidth = child.Dimensions.Content.Width
-						if child.LastLineWidth > 0 {
-							childWidth = child.LastLineWidth
-						}
-						currentX += childWidth
-					}
+					currentX += childWidth
 				}
 			} else {
 				currentX += childWidth
-				// Track text children that start at the left edge of a line.
-				if isTextNode(child) && currentX-childWidth == left {
-					lastTextChild = child
-					lastTextChildLineY = currentY
-				}
 			}
 		}
 	}
 
 	totalHeight := (currentY - box.Dimensions.Content.Y) + lineHeight
 	box.Dimensions.Content.Height = totalHeight
-}
-
-// isTextNode reports whether box is a pure text node (no tag, just content).
-func isTextNode(box *LayoutBox) bool {
-	return box != nil && box.StyledNode != nil && box.StyledNode.Node.Type == 0
 }
 
 func (box *LayoutBox) calculateBlockWidth(containingBlock Dimensions, ctx *LayoutContext) {

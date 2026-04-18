@@ -35,7 +35,8 @@ func (f *FallbackMeasurer) MeasureWord(word string, fontFamily string, fontSize 
 }
 
 // WordWrap breaks text into lines that fit within maxWidth using the given measurer.
-// Returns a slice of line strings.
+// Returns a slice of line strings. Leading/trailing whitespace in text is preserved
+// as a single space on the first/last line respectively (CSS normal whitespace).
 func WordWrap(text string, fontFamily string, fontSize float64, maxWidth float64, measurer TextMeasurer, fontWeight string, fontStyle string) []string {
 	if measurer == nil {
 		measurer = &FallbackMeasurer{}
@@ -43,6 +44,17 @@ func WordWrap(text string, fontFamily string, fontSize float64, maxWidth float64
 	words := splitWords(text)
 	if len(words) == 0 {
 		return []string{""}
+	}
+
+	// normalizeInlineText may have added a leading space to the first word's
+	// surrounding token; splitWords strips it again, so re-attach spaces.
+	hasLeading := len(text) > 0 && text[0] == ' '
+	hasTrailing := len(text) > 0 && text[len(text)-1] == ' '
+	if hasLeading {
+		words[0] = " " + words[0]
+	}
+	if hasTrailing {
+		words[len(words)-1] = words[len(words)-1] + " "
 	}
 
 	var lines []string

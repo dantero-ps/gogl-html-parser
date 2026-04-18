@@ -35,12 +35,20 @@ func BuildStyledTree(node *html.Node, stylesheet *css.Stylesheet) *StyledNode {
 }
 
 func buildStyledTreeRecursive(node *html.Node, stylesheet *css.Stylesheet, parentProps PropertyMap) *StyledNode {
-	if node.Type == 0 {
+	if node.Type == html.TextNode {
 		inheritedProps := make(PropertyMap)
 
 		for prop, value := range parentProps {
 			if inheritableProperties[prop] {
 				inheritedProps[prop] = value
+			}
+		}
+		// Apply initial values for inheritable properties not provided by parent.
+		for prop := range inheritableProperties {
+			if _, exists := inheritedProps[prop]; !exists {
+				if iv := InitialValue(prop); iv != "" {
+					inheritedProps[prop] = iv
+				}
 			}
 		}
 		return &StyledNode{Node: node, SpecifiedValues: inheritedProps}
@@ -56,6 +64,14 @@ func buildStyledTreeRecursive(node *html.Node, stylesheet *css.Stylesheet, paren
 			// If this property is not already defined, inherit from parent
 			if _, exists := styledNode.SpecifiedValues[prop]; !exists {
 				styledNode.SpecifiedValues[prop] = value
+			}
+		}
+	}
+	// Apply initial values for inheritable properties still missing after inheritance.
+	for prop := range inheritableProperties {
+		if _, exists := styledNode.SpecifiedValues[prop]; !exists {
+			if iv := InitialValue(prop); iv != "" {
+				styledNode.SpecifiedValues[prop] = iv
 			}
 		}
 	}
