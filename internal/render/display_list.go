@@ -252,15 +252,17 @@ func renderBox(box *layout.LayoutBox, dl *DisplayList) {
 	}
 
 	// 4. Children (Recursive Traversal)
-	// Even though the prompt says post-order (children first), browser engines
-	// usually put children commands after parent background to ensure they are on top.
-	for _, child := range box.Children {
-		renderBox(child, dl)
-	}
-
-	// 5. Text Rendering
-	if box.StyledNode != nil && box.StyledNode.Node.Type == html.TextNode { // Assuming 0 is TextNode
-		RenderText(box, dl)
+	// Anonymous boxes with IFC LineBoxes render directly from fragments.
+	if box.BoxType == layout.AnonymousBox && len(box.LineBoxes) > 0 {
+		renderIFCLineBoxes(box, dl)
+	} else {
+		for _, child := range box.Children {
+			renderBox(child, dl)
+		}
+		// 5. Text Rendering
+		if box.StyledNode != nil && box.StyledNode.Node.Type == html.TextNode {
+			RenderText(box, dl)
+		}
 	}
 
 	// End scroll after children and text
@@ -271,6 +273,40 @@ func renderBox(box *layout.LayoutBox, dl *DisplayList) {
 	// Clear clipping after children and text are drawn
 	if isClipped {
 		dl.Add(ClipRectCmd{Clear: true})
+	}
+}
+
+// renderIFCLineBoxes renders an anonymous box's IFC line fragments directly.
+func renderIFCLineBoxes(box *layout.LayoutBox, dl *DisplayList) {
+	defaultColor := Color{0, 0, 0, 255}
+
+	for _, lb := range box.LineBoxes {
+		for _, frag := range lb.Fragments {
+			color := defaultColor
+			if frag.TextBox != nil && frag.TextBox.StyledNode != nil {
+				if c := frag.TextBox.StyledNode.SpecifiedValues["color"]; c != "" {
+					color = ParseColor(c)
+				}
+			}
+
+			ascent := frag.Ascent + 3
+			if ascent <= 0 {
+				ascent = frag.FontSize
+			}
+
+			dl.Add(DrawTextCmd{
+				Text:           frag.Text,
+				X:              frag.X,
+				Y:              frag.Y + ascent,
+				FontSize:       frag.FontSize,
+				Color:          color,
+				FontFamily:     frag.FontFamily,
+				TextAlign:      "left", // X positions are pre-computed by the IFC
+				ContainerWidth: frag.Width,
+				FontWeight:     frag.FontWeight,
+				FontStyle:      frag.FontStyle,
+			})
+		}
 	}
 }
 

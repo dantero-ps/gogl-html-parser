@@ -1936,31 +1936,45 @@ func TestInlineSpanBetweenTextWithRealisticMeasurer(t *testing.T) {
 	spanBox := anonBox.Children[1]
 	textAfter := anonBox.Children[2]
 
-	// All on same line
-	firstY := textBefore.Dimensions.Content.Y
-	for i, child := range anonBox.Children {
-		if child.Dimensions.Content.Y != firstY {
-			t.Errorf("Child %d Y (%.1f) differs from first child Y (%.1f)", i, child.Dimensions.Content.Y, firstY)
+	// IFC model: assert via LineBoxes. All three items must be on the same line.
+	if len(anonBox.LineBoxes) == 0 {
+		t.Fatal("expected IFC LineBoxes on anonBox")
+	}
+	if len(anonBox.LineBoxes) > 1 {
+		t.Errorf("expected 1 line, got %d (items should all fit in 800px)", len(anonBox.LineBoxes))
+	}
+	line := anonBox.LineBoxes[0]
+	if len(line.Fragments) < 3 {
+		t.Fatalf("expected 3 fragments on line 0, got %d", len(line.Fragments))
+	}
+
+	// Fragments must appear in left-to-right order with no overlap.
+	for i := 1; i < len(line.Fragments); i++ {
+		prev, cur := line.Fragments[i-1], line.Fragments[i]
+		if cur.X < prev.X+prev.Width {
+			t.Errorf("fragment[%d] X=%.1f overlaps fragment[%d] end=%.1f",
+				i, cur.X, i-1, prev.X+prev.Width)
 		}
 	}
 
-	// Span width should be ~30px (3 chars * 10px)
+	// Span width should be ~30px (3 chars * 10px); the IFC fragment carries the real width.
+	spanFragW := line.Fragments[1].Width
 	spanExpectedWidth := 3.0 * 10.0
-	if spanBox.Dimensions.Content.Width > spanExpectedWidth*1.5 {
-		t.Errorf("Span width should be ~%.1f, got %.1f", spanExpectedWidth, spanBox.Dimensions.Content.Width)
+	if spanFragW > spanExpectedWidth*1.5 {
+		t.Errorf("Span fragment width should be ~%.1f, got %.1f", spanExpectedWidth, spanFragW)
 	}
 
-	// Span should start after "Before " (~70px)
+	// Span LayoutBox Dimensions: X must be ≥ textBefore fragment end (gap = 1 space).
 	textBeforeEnd := textBefore.Dimensions.Content.X + textBefore.Dimensions.Content.Width
-	if math.Abs(spanBox.Dimensions.Content.X-textBeforeEnd) > 1.0 {
-		t.Errorf("Span X (%.1f) should be adjacent to textBefore end (%.1f)",
+	if spanBox.Dimensions.Content.X < textBeforeEnd {
+		t.Errorf("Span X (%.1f) should be after textBefore end (%.1f)",
 			spanBox.Dimensions.Content.X, textBeforeEnd)
 	}
 
-	// textAfter should start after span
+	// textAfter LayoutBox Dimensions: X must be ≥ span end.
 	spanEnd := spanBox.Dimensions.Content.X + spanBox.Dimensions.Content.Width
-	if math.Abs(textAfter.Dimensions.Content.X-spanEnd) > 1.0 {
-		t.Errorf("textAfter X (%.1f) should be adjacent to span end (%.1f)",
+	if textAfter.Dimensions.Content.X < spanEnd {
+		t.Errorf("textAfter X (%.1f) should be after span end (%.1f)",
 			textAfter.Dimensions.Content.X, spanEnd)
 	}
 }

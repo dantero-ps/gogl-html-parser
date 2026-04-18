@@ -115,6 +115,10 @@ type LayoutBox struct {
 	ScrollOffsetY  float64 // pixels scrolled vertically (positive = scrolled down)
 	Overflow       string  // "" | "visible" | "hidden" | "scroll" | "auto"
 	ChildrenHeight float64 // total height occupied by children (used for scroll bounds)
+
+	// IFC fields — set by layoutAnonymousIFC when this is an AnonymousBox.
+	// Non-nil means the render side should use these instead of child recursion.
+	LineBoxes []LineBox
 }
 
 func (box *LayoutBox) IsScrollable() bool {

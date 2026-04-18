@@ -1,6 +1,7 @@
 package layout
 
 import (
+	"github.com/furkandgn/goglweb/internal/parser/html"
 	"regexp"
 	"strconv"
 	"strings"
@@ -120,7 +121,7 @@ func (box *LayoutBox) layoutInline(containingBlock Dimensions, ctx *LayoutContex
 	box.Dimensions.Content.Width = 0
 	box.Dimensions.Content.Height = 0
 
-	if box.StyledNode != nil && box.StyledNode.Node.Type == 0 {
+	if box.StyledNode != nil && box.StyledNode.Node.Type == html.TextNode {
 		content := box.StyledNode.Node.Content
 		fontSize := ParseLengthWithContext(box.getValue("font-size"), 16, box, ctx)
 		fontFamily := box.getValue("font-family")
@@ -205,96 +206,7 @@ func (box *LayoutBox) layoutInline(containingBlock Dimensions, ctx *LayoutContex
 }
 
 func (box *LayoutBox) layoutAnonymous(containingBlock Dimensions, ctx *LayoutContext) {
-	box.Dimensions.Content.Width = containingBlock.Content.Width
-	box.Dimensions.Content.Height = 0
-	box.Dimensions.Content.X = containingBlock.Content.X
-	box.Dimensions.Content.Y = containingBlock.Content.Y
-
-	left := box.Dimensions.Content.X
-	right := left + containingBlock.Content.Width
-	currentX := left
-	currentY := box.Dimensions.Content.Y
-	lineHeight := 0.0
-
-	for _, child := range box.Children {
-		// Layout child with currentX so it positions itself correctly.
-		// Full container width is passed so the child can word-wrap normally.
-		child.LayoutWithContext(Dimensions{
-			Content: Rect{
-				X:      currentX,
-				Y:      currentY,
-				Width:  containingBlock.Content.Width,
-				Height: containingBlock.Content.Height,
-			},
-		}, ctx)
-
-		childLineH := child.Dimensions.Content.Height
-		if child.NumLines > 1 {
-			childLineH = child.Dimensions.Content.Height / float64(child.NumLines)
-		}
-		if childLineH > lineHeight {
-			lineHeight = childLineH
-		}
-
-		// How this child affects the cursor depends on whether it wraps.
-		if child.NumLines > 1 {
-			// Multi-line text: move cursor to start of last line.
-			wrappedLineH := child.Dimensions.Content.Height / float64(child.NumLines)
-			advanceY := wrappedLineH * float64(child.NumLines-1)
-			currentY += advanceY
-			currentX = left + child.LastLineWidth
-			lineHeight = wrappedLineH
-		} else {
-			// Single-line child: advance X by its width.
-			childWidth := child.Dimensions.Content.Width
-			if child.LastLineWidth > 0 {
-				childWidth = child.LastLineWidth
-			}
-
-			// Overflow check.
-			if currentX+childWidth > right && currentX > left {
-				// Regular line wrap.
-				currentY += lineHeight
-				currentX = left
-				lineHeight = 0
-
-				child.LayoutWithContext(Dimensions{
-					Content: Rect{
-						X:      currentX,
-						Y:      currentY,
-						Width:  containingBlock.Content.Width,
-						Height: containingBlock.Content.Height,
-					},
-				}, ctx)
-
-				childLineH = child.Dimensions.Content.Height
-				if child.NumLines > 1 {
-					childLineH = child.Dimensions.Content.Height / float64(child.NumLines)
-				}
-				if childLineH > lineHeight {
-					lineHeight = childLineH
-				}
-				if child.NumLines > 1 {
-					wrappedLineH := child.Dimensions.Content.Height / float64(child.NumLines)
-					advanceY := wrappedLineH * float64(child.NumLines-1)
-					currentY += advanceY
-					currentX = left + child.LastLineWidth
-					lineHeight = wrappedLineH
-				} else {
-					childWidth = child.Dimensions.Content.Width
-					if child.LastLineWidth > 0 {
-						childWidth = child.LastLineWidth
-					}
-					currentX += childWidth
-				}
-			} else {
-				currentX += childWidth
-			}
-		}
-	}
-
-	totalHeight := (currentY - box.Dimensions.Content.Y) + lineHeight
-	box.Dimensions.Content.Height = totalHeight
+	box.layoutAnonymousIFC(containingBlock, ctx)
 }
 
 func (box *LayoutBox) calculateBlockWidth(containingBlock Dimensions, ctx *LayoutContext) {
@@ -843,7 +755,7 @@ func (box *LayoutBox) maxSubtreeWidth(ctx *LayoutContext) float64 {
 		return 0
 	}
 	// Text nodes: Content.Width is set to actual text width in layoutInline
-	if box.StyledNode != nil && box.StyledNode.Node.Type == 0 {
+	if box.StyledNode != nil && box.StyledNode.Node.Type == html.TextNode {
 		return box.Dimensions.Content.Width +
 			box.Dimensions.Padding.Left + box.Dimensions.Padding.Right +
 			box.Dimensions.Border.Left + box.Dimensions.Border.Right +
