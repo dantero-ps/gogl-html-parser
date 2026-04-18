@@ -385,17 +385,23 @@ func (p *GPUPainter) Flush() {
 	p.shader.Use()
 
 	if len(p.rectVerts) > 0 {
+		gl.Enable(gl.BLEND)
+		gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
 		p.shader.SetBool("uUseTexture", false)
 		p.defaultTexture.Bind(0)
 		p.shader.SetInt("uTexture", 0)
 		p.batchMesh.Upload(p.rectVerts)
 		p.batchMesh.DrawQuads(len(p.rectVerts) / 4)
 		p.rectVerts = p.rectVerts[:0]
+		gl.Disable(gl.BLEND)
 	}
 
 	if len(p.glyphBatches) > 0 {
 		gl.Enable(gl.BLEND)
-		gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+		// Atlas glyphs are stored with premultiplied alpha (RGB = mask coverage),
+		// so use the premultiplied blend equation; SRC_ALPHA here would darken edges
+		// and produce a faint outline halo.
+		gl.BlendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
 		p.shader.SetBool("uUseTexture", true)
 		p.shader.SetInt("uTexture", 0)
 		for texID, verts := range p.glyphBatches {

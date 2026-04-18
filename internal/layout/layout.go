@@ -823,6 +823,53 @@ func (box *LayoutBox) applyRelativeOffset(ctx *LayoutContext) {
 
 // --- Flex Layout ---
 
+// measureMaxContentWidth returns the max-content width of a box by doing a
+// shrink-to-fit layout with a zero-width containing block. Block children with
+// width:auto will end up with content width 0, but text nodes report their
+// natural width when maxWidth==0 in layoutInline. We then walk the subtree to
+// find the maximum text/inline width and add box's own padding+border+margin.
+func (box *LayoutBox) measureMaxContentWidth(ctx *LayoutContext) float64 {
+	zeroCB := Dimensions{}
+	zeroCB.Content.Width = 0
+	box.LayoutWithContext(zeroCB, ctx)
+	return box.maxSubtreeWidth(ctx)
+}
+
+// maxSubtreeWidth walks the box tree after a 0-width layout and returns the
+// maximum content width contributed by text nodes plus accumulated
+// padding/border/margin from ancestor boxes.
+func (box *LayoutBox) maxSubtreeWidth(ctx *LayoutContext) float64 {
+	if box == nil {
+		return 0
+	}
+	// Text nodes: Content.Width is set to actual text width in layoutInline
+	if box.StyledNode != nil && box.StyledNode.Node.Type == 0 {
+		return box.Dimensions.Content.Width +
+			box.Dimensions.Padding.Left + box.Dimensions.Padding.Right +
+			box.Dimensions.Border.Left + box.Dimensions.Border.Right +
+			box.Dimensions.Margin.Left + box.Dimensions.Margin.Right
+	}
+	// For non-text nodes, check explicit width first
+	if w := box.getValue("width"); w != "" && w != "auto" {
+		return box.Dimensions.Content.Width +
+			box.Dimensions.Padding.Left + box.Dimensions.Padding.Right +
+			box.Dimensions.Border.Left + box.Dimensions.Border.Right +
+			box.Dimensions.Margin.Left + box.Dimensions.Margin.Right
+	}
+	// Otherwise, find max child content width
+	var maxChild float64
+	for _, child := range box.Children {
+		cw := child.maxSubtreeWidth(ctx)
+		if cw > maxChild {
+			maxChild = cw
+		}
+	}
+	return maxChild +
+		box.Dimensions.Padding.Left + box.Dimensions.Padding.Right +
+		box.Dimensions.Border.Left + box.Dimensions.Border.Right +
+		box.Dimensions.Margin.Left + box.Dimensions.Margin.Right
+}
+
 // resolveFlexConfig reads flex container properties from the box's styled node.
 func (box *LayoutBox) resolveFlexConfig() FlexConfig {
 	dir := box.getValue("flex-direction")
@@ -899,11 +946,15 @@ func (box *LayoutBox) layoutFlex(containingBlock Dimensions, ctx *LayoutContext)
 		items = append(items, flexItem{box: child, baseSize: base, grow: grow, shrink: shrink})
 	}
 
-	// --- Step 2: lay out each item to get intrinsic cross size ---
+	// --- Step 2: lay out each item to get intrinsic sizes ---
 	for i := range items {
 		cb := box.Dimensions
 		if isRow {
 			if items[i].baseSize > 0 {
+				cb.Content.Width = items[i].baseSize
+			} else if items[i].box.getValue("width") == "" || items[i].box.getValue("width") == "auto" {
+				// No explicit basis/width: measure max-content width so item doesn't fill container.
+				items[i].baseSize = items[i].box.measureMaxContentWidth(ctx)
 				cb.Content.Width = items[i].baseSize
 			}
 		} else {
@@ -923,6 +974,16 @@ func (box *LayoutBox) layoutFlex(containingBlock Dimensions, ctx *LayoutContext)
 			}
 			items[i].crossSize = items[i].box.Dimensions.MarginBox().Width
 		}
+	}
+
+	// For column containers with auto height, mainSize was 0 at the start.
+	// Now that we know item sizes, set mainSize to the total so grow/shrink is a no-op.
+	if !isRow && box.getHeight() == "auto" {
+		totalItems := 0.0
+		for i := range items {
+			totalItems += items[i].baseSize
+		}
+		mainSize = totalItems
 	}
 
 	// --- Step 3: wrap lines ---
@@ -981,10 +1042,19 @@ func (box *LayoutBox) layoutFlex(containingBlock Dimensions, ctx *LayoutContext)
 				}
 			}
 		}
-		// compute line cross size
+		// compute line cross size from items
 		for _, idx := range lines[li].items {
 			if items[idx].crossSize > lines[li].crossSize {
 				lines[li].crossSize = items[idx].crossSize
+			}
+		}
+		// For single-line containers with an explicit cross dimension, the line
+		// cross size equals the container's inner cross size (CSS spec §9.4).
+		if cfg.Wrap == "nowrap" {
+			if isRow && box.getHeight() != "auto" {
+				lines[li].crossSize = box.Dimensions.Content.Height
+			} else if !isRow && box.getValue("width") != "" && box.getValue("width") != "auto" {
+				lines[li].crossSize = box.Dimensions.Content.Width
 			}
 		}
 	}
@@ -1041,13 +1111,15 @@ func (box *LayoutBox) layoutFlex(containingBlock Dimensions, ctx *LayoutContext)
 			}
 			item.box.LayoutWithContext(finalCB, ctx)
 
-			// align-items cross placement
+			// align-items cross placement. Content.Y is the inner content origin,
+			// so offset the computed margin-box top by the top edges (margin+border+padding).
 			if isRow {
+				topOffset := item.box.Dimensions.Margin.Top + item.box.Dimensions.Border.Top + item.box.Dimensions.Padding.Top
 				switch cfg.AlignItems {
 				case "center":
-					item.box.Dimensions.Content.Y = crossOrigin + (line.crossSize-item.box.Dimensions.MarginBox().Height)/2
+					item.box.Dimensions.Content.Y = crossOrigin + (line.crossSize-item.box.Dimensions.MarginBox().Height)/2 + topOffset
 				case "flex-end":
-					item.box.Dimensions.Content.Y = crossOrigin + line.crossSize - item.box.Dimensions.MarginBox().Height
+					item.box.Dimensions.Content.Y = crossOrigin + line.crossSize - item.box.Dimensions.MarginBox().Height + topOffset
 				case "stretch":
 					stretchH := line.crossSize - item.box.Dimensions.Margin.Top - item.box.Dimensions.Margin.Bottom - item.box.Dimensions.Padding.Top - item.box.Dimensions.Padding.Bottom - item.box.Dimensions.Border.Top - item.box.Dimensions.Border.Bottom
 					if stretchH > 0 {
@@ -1056,11 +1128,12 @@ func (box *LayoutBox) layoutFlex(containingBlock Dimensions, ctx *LayoutContext)
 				}
 				mainCursor += item.box.Dimensions.MarginBox().Width + gap
 			} else {
+				leftOffset := item.box.Dimensions.Margin.Left + item.box.Dimensions.Border.Left + item.box.Dimensions.Padding.Left
 				switch cfg.AlignItems {
 				case "center":
-					item.box.Dimensions.Content.X = crossOrigin + (line.crossSize-item.box.Dimensions.MarginBox().Width)/2
+					item.box.Dimensions.Content.X = crossOrigin + (line.crossSize-item.box.Dimensions.MarginBox().Width)/2 + leftOffset
 				case "flex-end":
-					item.box.Dimensions.Content.X = crossOrigin + line.crossSize - item.box.Dimensions.MarginBox().Width
+					item.box.Dimensions.Content.X = crossOrigin + line.crossSize - item.box.Dimensions.MarginBox().Width + leftOffset
 				case "stretch":
 					stretchW := line.crossSize - item.box.Dimensions.Margin.Left - item.box.Dimensions.Margin.Right - item.box.Dimensions.Padding.Left - item.box.Dimensions.Padding.Right - item.box.Dimensions.Border.Left - item.box.Dimensions.Border.Right
 					if stretchW > 0 {

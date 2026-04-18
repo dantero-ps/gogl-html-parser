@@ -8,6 +8,7 @@ import (
 	"github.com/furkandgn/goglweb/internal/dom"
 	"github.com/furkandgn/goglweb/internal/gpu"
 	"github.com/furkandgn/goglweb/internal/layout"
+	"github.com/furkandgn/goglweb/internal/parser/html"
 
 	"github.com/go-gl/gl/v4.1-core/gl"
 	"github.com/go-gl/glfw/v3.3/glfw"
@@ -58,6 +59,11 @@ type App struct {
 
 	// Internal hover tracking
 	lastHoverNodeRef NodeRef
+
+	// Internal active (mouse-down) tracking
+	lastActiveNode *html.Node
+	lastCursorX    float64
+	lastCursorY    float64
 }
 
 // New creates a high-level App with its own GLFW window and OpenGL context.
@@ -250,6 +256,14 @@ func (a *App) setupCallbacks() {
 
 	// Mouse button callback
 	a.window.SetMouseButtonCallback(func(w *glfw.Window, button glfw.MouseButton, action glfw.Action, mods glfw.ModifierKey) {
+		if button == glfw.MouseButtonLeft && action == glfw.Release {
+			if a.lastActiveNode != nil {
+				a.lastActiveNode.Active = false
+				a.lastActiveNode = nil
+				a.MarkDirty()
+			}
+		}
+
 		if button == glfw.MouseButtonLeft && action == glfw.Press {
 			x, y := w.GetCursorPos()
 
@@ -263,6 +277,11 @@ func (a *App) setupCallbacks() {
 
 			if hitResult != nil && hitResult.HTMLNode != nil {
 				targetNodeRef = NodeRef{node: hitResult.HTMLNode}
+
+				// Track active (mouse-down) state for :active pseudo-class
+				hitResult.HTMLNode.Active = true
+				a.lastActiveNode = hitResult.HTMLNode
+				a.MarkDirty()
 
 				// Dispatch to internal event manager for bubbling
 				a.eventMgr.DispatchEvent(dom.Event{
@@ -280,8 +299,11 @@ func (a *App) setupCallbacks() {
 		}
 	})
 
-	// Cursor position callback (hover tracking)
+	// Cursor position callback (hover tracking + cursor position cache)
 	a.window.SetCursorPosCallback(func(w *glfw.Window, x, y float64) {
+		a.lastCursorX = x
+		a.lastCursorY = y
+
 		layoutTree := a.Renderer.renderer.GetLayoutTree()
 		if layoutTree == nil {
 			return
@@ -297,7 +319,7 @@ func (a *App) setupCallbacks() {
 		if currentHoverNodeRef != a.lastHoverNodeRef {
 			// Exit old hover
 			if a.lastHoverNodeRef.node != nil {
-				dom.RemoveClass(a.lastHoverNodeRef.node, "hover")
+				a.lastHoverNodeRef.node.Hovered = false
 				a.eventMgr.DispatchEvent(dom.Event{
 					Type:   dom.EventHover,
 					Target: a.lastHoverNodeRef.node,
@@ -308,7 +330,7 @@ func (a *App) setupCallbacks() {
 			}
 			// Enter new hover
 			if currentHoverNodeRef.node != nil {
-				dom.AddClass(currentHoverNodeRef.node, "hover")
+				currentHoverNodeRef.node.Hovered = true
 				a.eventMgr.DispatchEvent(dom.Event{
 					Type:   dom.EventHover,
 					Target: currentHoverNodeRef.node,

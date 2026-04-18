@@ -177,12 +177,13 @@ func renderBox(box *layout.LayoutBox, dl *DisplayList) {
 	// 1. Background (Z-order: Bottom)
 	bgColorStr := getStyleValue(box, "background-color")
 	if bgColorStr != "" && bgColorStr != "transparent" {
-		// Background fills Padding Box (Content + Padding)
+		// Background fills Border Box (Content + Padding + Border) per CSS default
+		// background-clip: border-box, so the border is painted on top of the background.
 		rect := box.Dimensions.Content
-		rect.X -= box.Dimensions.Padding.Left
-		rect.Y -= box.Dimensions.Padding.Top
-		rect.Width += box.Dimensions.Padding.Left + box.Dimensions.Padding.Right
-		rect.Height += box.Dimensions.Padding.Top + box.Dimensions.Padding.Bottom
+		rect.X -= box.Dimensions.Padding.Left + box.Dimensions.Border.Left
+		rect.Y -= box.Dimensions.Padding.Top + box.Dimensions.Border.Top
+		rect.Width += box.Dimensions.Padding.Left + box.Dimensions.Padding.Right + box.Dimensions.Border.Left + box.Dimensions.Border.Right
+		rect.Height += box.Dimensions.Padding.Top + box.Dimensions.Padding.Bottom + box.Dimensions.Border.Top + box.Dimensions.Border.Bottom
 
 		bgColor := ParseColor(bgColorStr)
 		dl.Add(FillRectCmd{Rect: rect, Color: applyOpacity(bgColor)})
@@ -283,12 +284,17 @@ func getStyleValue(box *layout.LayoutBox, property string) string {
 // extractBorderColor extracts color value from border shorthand
 // Example: "2px solid #333" -> "#333"
 func extractBorderColor(borderValue string) string {
+	// Functional color notations like rgb()/rgba()/hsl()/hsla() may contain
+	// internal whitespace, so extract them whole before tokenizing the rest.
+	if i := strings.IndexAny(borderValue, "("); i != -1 {
+		if j := strings.Index(borderValue[i:], ")"); j != -1 {
+			start := strings.LastIndexAny(borderValue[:i], " \t") + 1
+			return borderValue[start : i+j+1]
+		}
+	}
 	parts := strings.Fields(borderValue)
-	// Border shorthand format: width style color
-	// Color is usually the last token (hex or named color)
 	for i := len(parts) - 1; i >= 0; i-- {
 		part := parts[i]
-		// Hex color or named color check
 		if strings.HasPrefix(part, "#") || isNamedColor(part) {
 			return part
 		}

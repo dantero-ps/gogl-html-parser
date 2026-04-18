@@ -34,9 +34,27 @@ func (p *Parser) Parse() *Stylesheet {
 }
 
 func (p *Parser) parseRule() Rule {
-	rule := Rule{Selector: p.curToken.Value}
-	p.nextToken() // { expected
+	selector := p.curToken.Value
+	p.nextToken()
 
+	// Collect additional class/id qualifier tokens (.foo, #bar) and pseudo-classes (:hover) that belong to this selector
+	for {
+		if p.curToken.Type == TokenIdent &&
+			(strings.HasPrefix(p.curToken.Value, ".") || strings.HasPrefix(p.curToken.Value, "#")) {
+			selector += p.curToken.Value
+			p.nextToken()
+		} else if p.curToken.Type == TokenColon {
+			p.nextToken()
+			if p.curToken.Type == TokenIdent {
+				selector += ":" + p.curToken.Value
+				p.nextToken()
+			}
+		} else {
+			break
+		}
+	}
+
+	rule := Rule{Selector: selector}
 	if p.curToken.Type == TokenLeftBrace {
 		p.nextToken()
 		for p.curToken.Type != TokenRightBrace && p.curToken.Type != TokenEOF {

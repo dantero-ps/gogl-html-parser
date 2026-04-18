@@ -13,6 +13,8 @@ type Node struct {
 	Content  string
 	Attr     map[string]string
 	Children []*Node
+	Hovered  bool
+	Active   bool
 }
 
 func NewElement(tagName string) *Node {

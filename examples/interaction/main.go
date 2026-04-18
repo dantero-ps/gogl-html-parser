@@ -84,10 +84,10 @@ h2 {
   border: 2px solid #0984e3;
   cursor: pointer;
 }
-.btn.hover {
+.btn:hover {
   background-color: #0984e3;
 }
-.btn.active {
+.btn:active {
   background-color: #6c5ce7;
   border: 2px solid #4a3ab0;
 }
@@ -102,7 +102,7 @@ h2 {
   border: 2px solid #00b894;
   cursor: pointer;
 }
-.hoverable.hover {
+.hoverable:hover {
   background-color: #00b894;
   color: #ffffff;
 }
@@ -151,8 +151,6 @@ h2 {
 	app.OnClick(func(x, y float64, target goglweb.NodeRef) {
 		id := app.GetAttribute(target, "id")
 		if id == "btn1" || id == "btn2" {
-			app.ToggleClass(target, "active")
-			app.MarkDirty()
 			msg := fmt.Sprintf("Clicked %s — toggled .active", id)
 			app.SetTextContent(statusNode, msg)
 			app.MarkDirty()
@@ -168,7 +166,6 @@ h2 {
 			text := app.NewText(fmt.Sprintf("Item %d added via AppendChild", itemCount))
 			app.AppendChild(item, text)
 			app.AppendChild(listContainer, item)
-			app.MarkDirty()
 			app.SetTextContent(statusNode, fmt.Sprintf("Space pressed — appended item %d", itemCount))
 			app.MarkDirty()
 		}
